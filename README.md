@@ -109,11 +109,12 @@ The library automatically extracts time estimates from issue descriptions using 
 
 The library automatically detects GitHub tokens from multiple sources:
 
-1. **Environment Variables** - `GITHUB_TOKEN`, `GITHUB_PAT`, `GITHUB_ACCESS_TOKEN`, `GH_TOKEN`
-2. **Git Configuration** - `git config github.token`
-3. **GitHub CLI** - `gh auth token`
-4. **Git Credential Store** - `git credential fill`
-5. **Explicit Token** - Passed directly to constructor
+1. **Config File** - `kanlytics/core/config.ini` (github_pat)
+2. **Environment Variables** - `GITHUB_TOKEN`, `GITHUB_PAT`, `GITHUB_ACCESS_TOKEN`, `GH_TOKEN`
+3. **Git Configuration** - `git config github.token`
+4. **GitHub CLI** - `gh auth token`
+5. **Git Credential Store** - `git credential fill`
+6. **Explicit Token** - Passed directly to constructor
 
 ## Project Board Integration
 

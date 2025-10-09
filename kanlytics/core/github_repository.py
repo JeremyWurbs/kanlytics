@@ -79,6 +79,7 @@ class GitHubRepository:
         """Get GitHub token from config.ini file."""
         try:
             from pathlib import Path
+            # Config file is now in the same directory as this file
             current_dir = Path(__file__).parent
             config_path = current_dir / "config.ini"
             config_dict = load_ini_as_dict(config_path)
