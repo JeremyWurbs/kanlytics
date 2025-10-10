@@ -8,9 +8,10 @@ from urllib.parse import urlparse
 class Kanlytics:
     """Main class for GitHub repository and project board analytics."""
     
-    def __init__(self, url: str, github_token: Optional[str] = None, project_id: Optional[str] = None):
+    def __init__(self, url: str, github_token: Optional[str] = None, project_id: Optional[str] = None, 
+                 load_history: bool = False, state: str = "all"):
         """
-        Initialize Kanlytics with a GitHub repository or project board URL.
+        Initialize Kanlytics with a GitHub repository or project board URL and load issues.
         
         Args:
             url: GitHub repository URL or project board URL
@@ -18,6 +19,8 @@ class Kanlytics:
                          to auto-detect from config file, git config, environment variables, or GitHub CLI
             project_id: Optional project board ID for status history tracking. If None, will attempt
                         to auto-detect from config file
+            load_history: Whether to load project board status history (slower, default: False)
+            state: Issue state to load ('open', 'closed', or 'all', default: 'all')
         """
         self.url = url
         self.url_type = self._detect_url_type(url)
@@ -42,6 +45,20 @@ class Kanlytics:
             self.project_repositories = self._initialize_project_board(url)
         else:
             raise ValueError(f"Unsupported URL type: {url}")
+        
+        # Load issues automatically during initialization
+        print(f"Loading issues from {self.url_type}...")
+        self.issues = self._load_issues(state, load_history)
+        print(f"Loaded {len(self.issues)} issues")
+    
+    def _load_issues(self, state: str, load_history: bool) -> List[GitHubIssue]:
+        """Load issues based on URL type and parameters."""
+        if self.url_type == "repository":
+            return self._get_repository_issues(state, load_history)
+        elif self.url_type == "project_board":
+            return self._get_project_board_issues_with_history(state, load_history)
+        else:
+            raise ValueError(f"Unsupported URL type: {self.url_type}")
     
     def _detect_url_type(self, url: str) -> str:
         """
@@ -435,32 +452,33 @@ class Kanlytics:
         """
         return self.github_token is not None
     
-    def get_issues_with_project_history(self, state: str = "all") -> List[GitHubIssue]:
+    def get_issues_with_project_history(self, state: str = "all", load_history: bool = False) -> List[GitHubIssue]:
         """
-        Get all issues with project board status history if project_id is configured.
+        Get all issues with optional project board status history.
         
         Args:
             state: Issue state ('open', 'closed', or 'all')
+            load_history: Whether to load project board status history (slower)
             
         Returns:
-            List of GitHubIssue objects with status history
+            List of GitHubIssue objects with optional status history
         """
         from tqdm import tqdm
         
         if self.url_type == "repository":
             print("Loading issues from repository...")
-            return self._get_repository_issues(state)
+            return self._get_repository_issues(state, load_history)
         elif self.url_type == "project_board":
             print("Loading issues from project board...")
-            return self._get_project_board_issues_with_history(state)
+            return self._get_project_board_issues_with_history(state, load_history)
         else:
             raise ValueError(f"Unsupported URL type: {self.url_type}")
     
-    def _get_repository_issues(self, state: str) -> List[GitHubIssue]:
+    def _get_repository_issues(self, state: str, load_history: bool = False) -> List[GitHubIssue]:
         """Get issues from a single repository."""
         issues = self.repository.get_issues(state=state)
         
-        if self.project_id:
+        if self.project_id and load_history:
             for issue in issues:
                 issue.status_history = self.repository.get_project_status_history(
                     issue.number, self.project_id
@@ -468,7 +486,7 @@ class Kanlytics:
         
         return issues
     
-    def _get_project_board_issues_with_history(self, state: str) -> List[GitHubIssue]:
+    def _get_project_board_issues_with_history(self, state: str, load_history: bool = False) -> List[GitHubIssue]:
         """Get issues from project board across multiple repositories."""
         from tqdm import tqdm
         
@@ -488,8 +506,8 @@ class Kanlytics:
             if state != "all" and github_issue.state.lower() != state.lower():
                 continue
             
-            # Add project board status history if project_id is available
-            if self.project_id:
+            # Add project board status history if project_id is available and load_history is True
+            if self.project_id and load_history:
                 # Get the repository object for this issue
                 repo_key = f"{issue_data['repository']['owner']['login']}/{issue_data['repository']['name']}"
                 repo_url = f"https://github.com/{repo_key}"
@@ -531,7 +549,7 @@ class Kanlytics:
     
     def analyze_issues(self, state: str = "all") -> Dict[str, Any]:
         """
-        Analyze all issues in the repository or project board.
+        Analyze the pre-loaded issues.
         
         Args:
             state: Issue state to analyze ('open', 'closed', or 'all')
@@ -541,8 +559,11 @@ class Kanlytics:
         """
         from tqdm import tqdm
         
-        print("Starting analysis...")
-        issues = self.get_issues_with_project_history(state=state)
+        # Filter issues by state if needed
+        if state == "all":
+            issues = self.issues
+        else:
+            issues = [i for i in self.issues if i.state.lower() == state.lower()]
         
         print(f"Analyzing {len(issues)} issues...")
         
@@ -571,6 +592,32 @@ class Kanlytics:
         
         print("Analysis complete!")
         return analysis
+    
+    def get_open_issues(self) -> List[GitHubIssue]:
+        """Get all open issues."""
+        return [i for i in self.issues if i.state == "open"]
+    
+    def get_closed_issues(self) -> List[GitHubIssue]:
+        """Get all closed issues."""
+        return [i for i in self.issues if i.state == "closed"]
+    
+    def get_issues_by_assignee(self, assignee: str) -> List[GitHubIssue]:
+        """Get all issues assigned to a specific user."""
+        return [i for i in self.issues if any(a.get('login', '').lower() == assignee.lower() for a in i.assignees)]
+    
+    def get_issues_with_time_estimates(self) -> List[GitHubIssue]:
+        """Get all issues that have time estimates."""
+        return [i for i in self.issues if i.time_estimate]
+    
+    def get_issues_by_label(self, label: str) -> List[GitHubIssue]:
+        """Get all issues with a specific label."""
+        return [i for i in self.issues if any(l.get('name', '').lower() == label.lower() for l in i.labels)]
+    
+    def get_issues_by_repository(self, repo_name: str) -> List[GitHubIssue]:
+        """Get all issues from a specific repository (for project boards)."""
+        if self.url_type != "project_board":
+            return []
+        return [i for i in self.issues if repo_name.lower() in i.url.lower()]
     
     def _get_assignee_distribution(self, issues: List[GitHubIssue]) -> Dict[str, int]:
         """Get distribution of issues by assignee."""
