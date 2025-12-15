@@ -34,6 +34,7 @@ function buildDepPaths(
   tasks: TaskItem[],
   edges: Edge[],
   rowIndexById: Map<string, number>,
+  xOffset: number,
   pxPerDay: number,
   rowHeight: number,
   yOffset: number
@@ -45,11 +46,11 @@ function buildDepPaths(
     const b = byId.get(e.to);
     if (!a || !b) continue;
 
-    const ax = (a.schedule.x + Math.max(1, a.schedule.w)) * pxPerDay;
+    const ax = xOffset + (a.schedule.x + Math.max(1, a.schedule.w)) * pxPerDay;
     const aRow = rowIndexById.get(a.id) ?? a.schedule.row;
     const ay = aRow * rowHeight + rowHeight / 2 + yOffset;
 
-    const bx = b.schedule.x * pxPerDay;
+    const bx = xOffset + b.schedule.x * pxPerDay;
     const bRow = rowIndexById.get(b.id) ?? b.schedule.row;
     const by = bRow * rowHeight + rowHeight / 2 + yOffset;
 
@@ -93,6 +94,8 @@ export const GanttChart: React.FC<Props> = ({
 
   const maxX = maxEndX(filtered);
   const width = Math.max(900, (maxX + 5) * pxPerDay);
+  const chartPadLeft = 10; // pixels of breathing room at left edge
+  const svgWidth = width + chartPadLeft;
   const groups = useMemo(() => groupByPhase(filtered), [filtered]);
 
   // Build a "display row model" that both panes use. This fixes misalignment when
@@ -122,8 +125,8 @@ export const GanttChart: React.FC<Props> = ({
   const height = useMemo(() => Math.max(220, (displayRows.length + 1) * rowHeight), [displayRows.length, rowHeight]);
 
   const depPaths = useMemo(
-    () => (showDeps ? buildDepPaths(filtered, layout.edges, rowIndexById, pxPerDay, rowHeight, chartYOffset) : []),
-    [filtered, layout.edges, rowIndexById, pxPerDay, rowHeight, chartYOffset, showDeps]
+    () => (showDeps ? buildDepPaths(filtered, layout.edges, rowIndexById, chartPadLeft, pxPerDay, rowHeight, chartYOffset) : []),
+    [filtered, layout.edges, rowIndexById, chartPadLeft, pxPerDay, rowHeight, chartYOffset, showDeps]
   );
 
   // The left pane sticky header (search/filters) is taller than the right pane
@@ -174,11 +177,6 @@ export const GanttChart: React.FC<Props> = ({
             <option value="">All phases</option>
             {phases.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
-          <div style={{ height: 10 }} />
-          <div className="small">
-            Start: <span className="mono">{layout.meta.project_start}</span><br />
-            Mode: <span className="mono">{layout.meta.duration_mode}</span> · Working days: <span className="mono">{String(layout.meta.working_days)}</span>
-          </div>
         </div>
 
         <div>
@@ -221,20 +219,20 @@ export const GanttChart: React.FC<Props> = ({
       </div>
 
       <div style={{ overflow: "auto" }}>
-        <div ref={rightHeaderRef} className="ganttHeader" style={{ padding: 12, minWidth: width }}>
-          <svg width={width} height={28}>
+        <div ref={rightHeaderRef} className="ganttHeader" style={{ padding: 12, minWidth: svgWidth }}>
+          <svg width={svgWidth} height={28}>
             {ticks.map(d => (
               <g key={d}>
-                <line x1={d * pxPerDay} y1={0} x2={d * pxPerDay} y2={28} stroke="#e2e8f0" />
-                <text x={d * pxPerDay + 2} y={18} fontSize={11} fill="#475569">{formatTick(d)}</text>
+                <line x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={28} stroke="#e2e8f0" />
+                <text x={chartPadLeft + d * pxPerDay + 2} y={18} fontSize={11} fill="#475569">{formatTick(d)}</text>
               </g>
             ))}
           </svg>
         </div>
 
-        <svg width={width} height={height + chartYOffset} style={{ display: "block" }}>
+        <svg width={svgWidth} height={height + chartYOffset} style={{ display: "block" }}>
           {ticks.map(d => (
-            <line key={d} x1={d * pxPerDay} y1={0} x2={d * pxPerDay} y2={height + chartYOffset} stroke="#f1f5f9" />
+            <line key={d} x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={height + chartYOffset} stroke="#f1f5f9" />
           ))}
 
           {showDeps && depPaths.map(p => (
@@ -242,15 +240,27 @@ export const GanttChart: React.FC<Props> = ({
           ))}
 
           {filtered.map(t => {
-            const x = (t.schedule.x ?? 0) * pxPerDay;
+            const x = chartPadLeft + (t.schedule.x ?? 0) * pxPerDay;
             const wRaw = (t.schedule.w ?? 0) * pxPerDay;
             const w = Math.max(6, wRaw); // milestones show as small pill
             const rowIdx = rowIndexById.get(t.id) ?? t.schedule.row;
             const y = rowIdx * rowHeight + 5 + chartYOffset;
             return (
               <g key={t.id}>
-                <rect x={x} y={y} width={w} height={rowHeight - 10} rx={8} ry={8} fill="#0f172a" opacity={0.9} />
-                <text x={x + 8} y={y + (rowHeight - 10) / 2 + 4} fontSize={11} fill="#ffffff" style={{ pointerEvents: "none" }}>
+                {/* Default task bar: empty oval/pill (stroke only) */}
+                <rect
+                  x={x}
+                  y={y}
+                  width={w}
+                  height={rowHeight - 10}
+                  rx={8}
+                  ry={8}
+                  fill="none"
+                  stroke="#0f172a"
+                  strokeWidth={2}
+                  opacity={0.9}
+                />
+                <text x={x + 8} y={y + (rowHeight - 10) / 2 + 4} fontSize={11} fill="#0f172a" style={{ pointerEvents: "none" }}>
                   {t.id}
                 </text>
               </g>
