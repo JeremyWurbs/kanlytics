@@ -8,6 +8,7 @@ type Props = {
   showDeps?: boolean;
   showDailyGrid?: boolean;
   timeAxisMode?: "dayCount" | "calendar";
+  phaseLayout?: "linear" | "stacked";
 };
 
 function groupByPhase(tasks: TaskItem[]) {
@@ -81,6 +82,8 @@ function buildDepPaths(
   rowIndexById: Map<string, number>,
   spanById: Map<string, { xDay: number; wDay: number }>,
   barEndsById: Map<string, { startXDay: number; endXDay: number }>,
+  phaseLayout: "linear" | "stacked",
+  phaseHeaderRowByPhase: Map<string, number>,
   xOffset: number,
   pxPerDay: number,
   rowHeight: number,
@@ -111,8 +114,29 @@ function buildDepPaths(
     const bRow = rowIndexById.get(b.id) ?? b.schedule.row;
     const by = bRow * rowHeight + rowHeight / 2 + yOffset;
 
-    const midX = (ax + bx) / 2;
-    const d = `M ${ax} ${ay} L ${midX} ${ay} L ${midX} ${by} L ${bx} ${by}`;
+    const aPhase = a.phase || "Unphased";
+    const bPhase = b.phase || "Unphased";
+
+    // In stacked mode, cross-phase deps often go "backwards" in x (because each phase
+    // starts at x=0). If we route naively, the line cuts through the target phase's
+    // task bars. Instead, detour into the target phase's header/axis lane, run
+    // backwards there, then drop down into the target bar start.
+    let d: string;
+    if (phaseLayout === "stacked" && aPhase !== bPhase && bx < ax) {
+      const headerRow = phaseHeaderRowByPhase.get(bPhase) ?? 0;
+      // Put the lane at the very top of the phase header row to avoid the date labels.
+      const laneY = headerRow * rowHeight + 2 + yOffset;
+
+      const bump = 10;
+      const xOut = ax + bump;
+      // Ensure we extend a bit left of the dependent task start even if it's at day 0.
+      const xIn = Math.max(0, bx - bump);
+
+      d = `M ${ax} ${ay} L ${xOut} ${ay} L ${xOut} ${laneY} L ${xIn} ${laneY} L ${xIn} ${by} L ${bx} ${by}`;
+    } else {
+      const midX = (ax + bx) / 2;
+      d = `M ${ax} ${ay} L ${midX} ${ay} L ${midX} ${by} L ${bx} ${by}`;
+    }
     paths.push({ d, key: `${e.from}->${e.to}` });
   }
   return paths;
@@ -125,6 +149,7 @@ export const GanttChart: React.FC<Props> = ({
   showDeps = true,
   showDailyGrid = false,
   timeAxisMode = "dayCount",
+  phaseLayout = "stacked",
 }) => {
   const [search, setSearch] = useState("");
   const [phaseFilter, setPhaseFilter] = useState<string>("");
@@ -150,9 +175,7 @@ export const GanttChart: React.FC<Props> = ({
     });
   }, [tasks, search, phaseFilter]);
 
-  // We always render on a calendar-day axis (no "skipping" weekends visually).
-  // When working_days=true, the backend schedule start/end will shift to skip weekends,
-  // and the bar will naturally span over weekends between those dates.
+  // Base project start (UTC midnight).
   const baseUtc = useMemo(() => parseIsoDateUtc(layout.meta.project_start) ?? Date.now(), [layout.meta.project_start]);
 
   const spanById = useMemo(() => {
@@ -172,6 +195,44 @@ export const GanttChart: React.FC<Props> = ({
     return m;
   }, [filtered, baseUtc]);
 
+  const phaseStartByPhase = useMemo(() => {
+    const m = new Map<string, number>();
+    if (phaseLayout !== "stacked") return m;
+    for (const t of filtered) {
+      const span = spanById.get(t.id);
+      if (!span) continue;
+      const ph = t.phase || "Unphased";
+      const cur = m.get(ph);
+      m.set(ph, cur == null ? span.xDay : Math.min(cur, span.xDay));
+    }
+    return m;
+  }, [filtered, spanById, phaseLayout]);
+
+  const baseUtcByPhase = useMemo(() => {
+    const m = new Map<string, number>();
+    if (phaseLayout !== "stacked") return m;
+    for (const [ph, startDay] of phaseStartByPhase.entries()) {
+      m.set(ph, baseUtc + startDay * 24 * 60 * 60 * 1000);
+    }
+    return m;
+  }, [phaseStartByPhase, baseUtc, phaseLayout]);
+
+  const drawSpanById = useMemo(() => {
+    // The spans used for drawing bars (xDay in chart coordinates).
+    // - linear: same as spanById (global timeline)
+    // - stacked: normalize each phase so its min start aligns to x=0
+    if (phaseLayout !== "stacked") return spanById;
+    const m = new Map<string, { xDay: number; wDay: number }>();
+    for (const t of filtered) {
+      const span = spanById.get(t.id);
+      if (!span) continue;
+      const ph = t.phase || "Unphased";
+      const off = phaseStartByPhase.get(ph) ?? 0;
+      m.set(t.id, { xDay: Math.max(0, span.xDay - off), wDay: span.wDay });
+    }
+    return m;
+  }, [filtered, spanById, phaseStartByPhase, phaseLayout]);
+
   const segmentsById = useMemo(() => {
     // If the backend is scheduling in working-day mode, split bars across weekends:
     // - draw only weekday segments
@@ -183,8 +244,8 @@ export const GanttChart: React.FC<Props> = ({
       Array<{ xDay: number; wDay: number; roundLeft: boolean; roundRight: boolean }>
     >();
 
-    const isWeekend = (dayIndex: number) => {
-      const t = baseUtc + dayIndex * 24 * 60 * 60 * 1000;
+    const isWeekend = (base: number, dayIndex: number) => {
+      const t = base + dayIndex * 24 * 60 * 60 * 1000;
       const dow = new Date(t).getUTCDay(); // 0=Sun..6=Sat
       return dow === 0 || dow === 6;
     };
@@ -192,8 +253,11 @@ export const GanttChart: React.FC<Props> = ({
     const splitOnWeekends = Boolean(layout.meta.working_days);
 
     for (const t of filtered) {
-      const span = spanById.get(t.id);
+      const span = drawSpanById.get(t.id);
       if (!span) continue;
+
+      const ph = t.phase || "Unphased";
+      const phaseBase = phaseLayout === "stacked" ? (baseUtcByPhase.get(ph) ?? baseUtc) : baseUtc;
 
       const startDay = span.xDay;
       const totalDays = Math.max(1, span.wDay); // render milestones as 1-day visual
@@ -209,7 +273,7 @@ export const GanttChart: React.FC<Props> = ({
       let curLen = 0;
 
       for (let d = startDay; d <= endDay; d += 1) {
-        if (isWeekend(d)) {
+        if (isWeekend(phaseBase, d)) {
           if (curStart != null && curLen > 0) {
             segs.push({ xDay: curStart, wDay: curLen, roundLeft: false, roundRight: false });
             curStart = null;
@@ -239,14 +303,14 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, segs);
     }
     return m;
-  }, [filtered, spanById, baseUtc, layout.meta.working_days]);
+  }, [filtered, drawSpanById, baseUtc, baseUtcByPhase, phaseLayout, layout.meta.working_days]);
 
   const barEndsById = useMemo(() => {
     // For arrows: use the first segment start and last segment end (in day units).
     const m = new Map<string, { startXDay: number; endXDay: number }>();
     for (const t of filtered) {
       const segs = segmentsById.get(t.id) || [];
-      const span = spanById.get(t.id);
+      const span = drawSpanById.get(t.id);
       if (!span) continue;
 
       if (segs.length === 0) {
@@ -262,7 +326,7 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, { startXDay, endXDay });
     }
     return m;
-  }, [filtered, segmentsById, spanById]);
+  }, [filtered, segmentsById, drawSpanById]);
 
   const maxXDay = useMemo(() => {
     let m = 0;
@@ -303,6 +367,29 @@ export const GanttChart: React.FC<Props> = ({
     return m;
   }, [displayRows]);
 
+  const phaseSections = useMemo(() => {
+    // Find each phase header row, and the y-range it covers (until next phase header).
+    // Used in stacked layout for per-phase axes and shading.
+    const sections: Array<{ phase: string; headerRowIdx: number; startRowIdx: number; endRowIdx: number }> = [];
+    let current: { phase: string; headerRowIdx: number; startRowIdx: number; endRowIdx: number } | null = null;
+    for (let i = 0; i < displayRows.length; i += 1) {
+      const r = displayRows[i];
+      if (r.kind === "phase") {
+        if (current) current.endRowIdx = i - 1;
+        current = { phase: r.phase, headerRowIdx: i, startRowIdx: i, endRowIdx: i };
+        sections.push(current);
+      }
+    }
+    if (current) current.endRowIdx = displayRows.length - 1;
+    return sections;
+  }, [displayRows]);
+
+  const phaseHeaderRowByPhase = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const sec of phaseSections) m.set(sec.phase, sec.headerRowIdx);
+    return m;
+  }, [phaseSections]);
+
   const height = useMemo(() => Math.max(220, (displayRows.length + 1) * rowHeight), [displayRows.length, rowHeight]);
 
   const depPaths = useMemo(
@@ -312,15 +399,30 @@ export const GanttChart: React.FC<Props> = ({
             filtered,
             layout.edges,
             rowIndexById,
-            spanById,
+            drawSpanById,
             barEndsById,
+            phaseLayout,
+            phaseHeaderRowByPhase,
             chartPadLeft,
             pxPerDay,
             rowHeight,
             chartYOffset
           )
         : [],
-    [filtered, layout.edges, rowIndexById, spanById, barEndsById, chartPadLeft, pxPerDay, rowHeight, chartYOffset, showDeps]
+    [
+      filtered,
+      layout.edges,
+      rowIndexById,
+      drawSpanById,
+      barEndsById,
+      phaseLayout,
+      phaseHeaderRowByPhase,
+      chartPadLeft,
+      pxPerDay,
+      rowHeight,
+      chartYOffset,
+      showDeps,
+    ]
   );
 
   // The left pane sticky header (search/filters) is taller than the right pane
@@ -347,23 +449,18 @@ export const GanttChart: React.FC<Props> = ({
 
   const dayCount = useMemo(() => Math.ceil(width / pxPerDay), [width, pxPerDay]);
 
-  const formatTick = useMemo(() => {
-    if (timeAxisMode !== "calendar") return (d: number) => String(d);
+  const dateFmt = useMemo(() => new Intl.DateTimeFormat(undefined, { month: "2-digit", day: "2-digit" }), []);
 
+  const formatTickForBase = useMemo(() => {
+    if (timeAxisMode !== "calendar") return (_base: number, d: number) => String(d);
     // Calendar axis: always add calendar days (do not "skip" weekends visually).
-    const fmt = new Intl.DateTimeFormat(undefined, { month: "2-digit", day: "2-digit" });
-    return (d: number) => {
-      return fmt.format(new Date(baseUtc + d * 24 * 60 * 60 * 1000));
-    };
-  }, [
-    timeAxisMode,
-    baseUtc,
-  ]);
+    return (base: number, d: number) => dateFmt.format(new Date(base + d * 24 * 60 * 60 * 1000));
+  }, [timeAxisMode, dateFmt]);
+
+  const formatTick = useMemo(() => (d: number) => formatTickForBase(baseUtc, d), [formatTickForBase, baseUtc]);
 
   const dayBands = useMemo(() => {
-    // Background banding:
-    // - Weekends: light blue
-    // - Weekdays: alternate light gray / white (Mon–Fri only)
+    // Background banding for LINEAR mode (single global axis).
     const out: { d: number; fill: string }[] = [];
     let workdayIdx = 0;
     for (let d = 0; d <= dayCount; d += 1) {
@@ -437,57 +534,131 @@ export const GanttChart: React.FC<Props> = ({
       <div style={{ overflow: "auto" }}>
         <div ref={rightHeaderRef} className="ganttHeader" style={{ padding: 12, minWidth: svgWidth }}>
           <svg width={svgWidth} height={28}>
-            {ticks.map(d => (
-              <g key={d}>
-                <line x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={28} stroke="#e2e8f0" />
-                <text x={chartPadLeft + d * pxPerDay + 2} y={18} fontSize={11} fill="#475569">{formatTick(d)}</text>
-              </g>
-            ))}
+            {phaseLayout === "linear"
+              ? ticks.map(d => (
+                  <g key={d}>
+                    <line x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={28} stroke="#e2e8f0" />
+                    <text x={chartPadLeft + d * pxPerDay + 2} y={18} fontSize={11} fill="#475569">
+                      {formatTick(d)}
+                    </text>
+                  </g>
+                ))
+              : null}
           </svg>
         </div>
 
         <svg width={svgWidth} height={height + chartYOffset} style={{ display: "block" }}>
-          {/* Day background bands */}
-          {dayBands.map((b) => (
-            <rect
-              key={b.d}
-              x={chartPadLeft + b.d * pxPerDay}
-              y={0}
-              width={pxPerDay}
-              height={height + chartYOffset}
-              fill={b.fill}
-            />
-          ))}
-
-          {/* Vertical grid lines */}
-          {showDailyGrid
-            ? Array.from({ length: dayCount + 1 }, (_, d) => (
-                <line
-                  key={d}
-                  x1={chartPadLeft + d * pxPerDay}
-                  y1={0}
-                  x2={chartPadLeft + d * pxPerDay}
-                  y2={height + chartYOffset}
-                  stroke="#e2e8f0"
-                />
-              ))
-            : ticks.map(d => (
-                <line
-                  key={d}
-                  x1={chartPadLeft + d * pxPerDay}
-                  y1={0}
-                  x2={chartPadLeft + d * pxPerDay}
-                  y2={height + chartYOffset}
-                  stroke="#e2e8f0"
+          {phaseLayout === "linear" ? (
+            <>
+              {/* Day background bands */}
+              {dayBands.map((b) => (
+                <rect
+                  key={b.d}
+                  x={chartPadLeft + b.d * pxPerDay}
+                  y={0}
+                  width={pxPerDay}
+                  height={height + chartYOffset}
+                  fill={b.fill}
                 />
               ))}
+
+              {/* Vertical grid lines */}
+              {showDailyGrid
+                ? Array.from({ length: dayCount + 1 }, (_, d) => (
+                    <line
+                      key={d}
+                      x1={chartPadLeft + d * pxPerDay}
+                      y1={0}
+                      x2={chartPadLeft + d * pxPerDay}
+                      y2={height + chartYOffset}
+                      stroke="#e2e8f0"
+                    />
+                  ))
+                : ticks.map(d => (
+                    <line
+                      key={d}
+                      x1={chartPadLeft + d * pxPerDay}
+                      y1={0}
+                      x2={chartPadLeft + d * pxPerDay}
+                      y2={height + chartYOffset}
+                      stroke="#e2e8f0"
+                    />
+                  ))}
+            </>
+          ) : (
+            <>
+              {/* Stacked mode: per-phase banding, grid, and per-phase axes */}
+              {phaseSections.map((sec) => {
+                const phaseBase = baseUtcByPhase.get(sec.phase) ?? baseUtc;
+                const y0 = sec.startRowIdx * rowHeight + chartYOffset;
+                const secH = (sec.endRowIdx - sec.startRowIdx + 1) * rowHeight;
+
+                // Build alternating weekday colors, resetting per phase.
+                const fills: string[] = [];
+                let workdayIdx = 0;
+                for (let d = 0; d <= dayCount; d += 1) {
+                  const t = phaseBase + d * 24 * 60 * 60 * 1000;
+                  const dow = new Date(t).getUTCDay();
+                  const isWeekend = dow === 0 || dow === 6;
+                  if (isWeekend) fills.push("#e6f3ff");
+                  else {
+                    fills.push(workdayIdx % 2 === 0 ? "#ffffff" : "#f8fafc");
+                    workdayIdx += 1;
+                  }
+                }
+
+                const lineDays = showDailyGrid ? Array.from({ length: dayCount + 1 }, (_, d) => d) : ticks;
+
+                return (
+                  <g key={`phase-${sec.phase}`}>
+                    {/* Day background bands for this phase section */}
+                    {fills.map((fill, d) => (
+                      <rect
+                        key={`band-${sec.phase}-${d}`}
+                        x={chartPadLeft + d * pxPerDay}
+                        y={y0}
+                        width={pxPerDay}
+                        height={secH}
+                        fill={fill}
+                      />
+                    ))}
+
+                    {/* Vertical grid lines for this phase section */}
+                    {lineDays.map((d) => (
+                      <line
+                        key={`grid-${sec.phase}-${d}`}
+                        x1={chartPadLeft + d * pxPerDay}
+                        y1={y0}
+                        x2={chartPadLeft + d * pxPerDay}
+                        y2={y0 + secH}
+                        stroke="#e2e8f0"
+                      />
+                    ))}
+
+                    {/* Per-phase axis labels on the phase header row */}
+                    {lineDays.map((d) => (
+                      <text
+                        key={`tick-${sec.phase}-${d}`}
+                        x={chartPadLeft + d * pxPerDay + 2}
+                        y={sec.headerRowIdx * rowHeight + 18 + chartYOffset}
+                        fontSize={11}
+                        fill="#475569"
+                      >
+                        {formatTickForBase(phaseBase, d)}
+                      </text>
+                    ))}
+                  </g>
+                );
+              })}
+            </>
+          )}
 
           {showDeps && depPaths.map(p => (
             <path key={p.key} d={p.d} fill="none" stroke="#94a3b8" strokeWidth={1} />
           ))}
 
           {filtered.map(t => {
-            const span = spanById.get(t.id);
+            const span = drawSpanById.get(t.id);
             const segs = segmentsById.get(t.id) || [];
             const rowIdx = rowIndexById.get(t.id) ?? t.schedule.row;
             const y = rowIdx * rowHeight + 5 + chartYOffset;

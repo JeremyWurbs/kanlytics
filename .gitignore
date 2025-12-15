@@ -106,6 +106,7 @@ kanlytics/frontend/node_modules/
 kanlytics/frontend/dist/
 kanlytics/frontend/.vite/
 kanlytics/frontend/package-lock.json
+*.tsbuildinfo
 
 # Local artifacts
 gantt_chart.png

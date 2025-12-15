@@ -28,6 +28,7 @@ export default function App() {
   const [showDeps, setShowDeps] = useState<boolean>(true);
   const [showDailyGrid, setShowDailyGrid] = useState<boolean>(false);
   const [timeAxisMode, setTimeAxisMode] = useState<"dayCount" | "calendar">("dayCount");
+  const [phaseLayout, setPhaseLayout] = useState<"linear" | "stacked">("stacked");
 
   const [planId, setPlanId] = useState<string>("");
   const [layout, setLayout] = useState<GanttLayout | null>(null);
@@ -381,6 +382,14 @@ export default function App() {
                   </div>
 
                   <div>
+                    <div className="label">Phase layout</div>
+                    <select value={phaseLayout} onChange={(e) => setPhaseLayout(e.target.value as any)}>
+                      <option value="stacked">Stacked</option>
+                      <option value="linear">Linear</option>
+                    </select>
+                  </div>
+
+                  <div>
                     <div className="label">Dependencies</div>
                     <select value={showDeps ? "yes" : "no"} onChange={(e) => setShowDeps(e.target.value === "yes")}>
                       <option value="yes">Show</option>
@@ -419,6 +428,7 @@ export default function App() {
               showDeps={showDeps}
               showDailyGrid={showDailyGrid}
               timeAxisMode={timeAxisMode}
+              phaseLayout={phaseLayout}
             />
           </div>
         )}
