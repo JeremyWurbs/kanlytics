@@ -191,7 +191,7 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ height: 12 }} />
+        {kanlyticsOpen ? <div style={{ height: 12 }} /> : null}
 
         {/* Panels (collapsible) */}
         {kanlyticsOpen ? (
@@ -218,7 +218,7 @@ export default function App() {
                   cursor: "pointer",
                   fontWeight: 700,
                   color: "#0f172a",
-                  marginBottom: 10,
+                  marginBottom: sourceOpen ? 10 : 0,
                 }}
                 title={sourceOpen ? "Collapse Source" : "Expand Source"}
               >
@@ -284,7 +284,7 @@ export default function App() {
                   cursor: "pointer",
                   fontWeight: 700,
                   color: "#0f172a",
-                  marginBottom: 10,
+                  marginBottom: ganttSettingsOpen ? 10 : 0,
                 }}
                 title={ganttSettingsOpen ? "Collapse Gantt Settings" : "Expand Gantt Settings"}
               >
@@ -327,7 +327,7 @@ export default function App() {
                   cursor: "pointer",
                   fontWeight: 700,
                   color: "#0f172a",
-                  marginBottom: 10,
+                  marginBottom: viewOptionsOpen ? 10 : 0,
                 }}
                 title={viewOptionsOpen ? "Collapse View Options" : "Expand View Options"}
               >
@@ -410,10 +410,12 @@ export default function App() {
           </>
         ) : null}
 
-        <div style={{ marginTop: 12 }}>
-          {err ? <div className="error">{err}</div> : null}
-          {msg ? <div className="success">{msg}</div> : null}
-        </div>
+        {err || msg ? (
+          <div style={{ marginTop: 12 }}>
+            {err ? <div className="error">{err}</div> : null}
+            {msg ? <div className="success">{msg}</div> : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="card">
