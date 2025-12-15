@@ -1,0 +1,551 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+import csv
+import math
+import re
+
+
+DateLike = Union[date, datetime, str]
+
+
+@dataclass(frozen=True)
+class Task:
+    """
+    A single task in the Gantt plan.
+    """
+    id: str
+    phase: str
+    name: str
+    details: str = ""
+    milestone_or_output: str = ""
+    dependencies: Tuple[str, ...] = field(default_factory=tuple)
+
+    # Durations (as provided)
+    wall_days: float = 0.0
+    billable_days: float = 0.0
+
+    # Optional extra fields (roles / notes / etc.)
+    roles: Dict[str, Any] = field(default_factory=dict)
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class ScheduledTask:
+    """
+    A task with computed schedule and layout properties.
+    """
+    task: Task
+    start: date
+    end: date  # inclusive end date
+    start_offset_days: int
+    duration_days: int  # in chosen day units (calendar days or working days)
+    row: int
+
+
+class Gantt:
+    """
+    Gantt plan loader + scheduler + layout engine.
+
+    Design goals:
+    - Keep the backend in pure Python (no Pandas required).
+    - Normalize "two header rows" CSVs like your checklist.
+    - Schedule by dependencies from a user-provided project start date.
+    - Default scheduling duration uses "wall days".
+
+    Key concepts:
+    - A task's earliest start is the day AFTER all its dependencies end.
+    - Duration is interpreted as number of days; default uses calendar days.
+      (You can enable working-days scheduling.)
+
+    Example::
+        gantt = Gantt.from_csv("tasks.csv")
+        gantt.schedule(start_date="2026-01-05")  # default uses wall days
+        data = gantt.export_layout()
+        # data is JSON-serializable and ready for a frontend.
+    """
+
+    def __init__(self, tasks: List[Task]) -> None:
+        self._tasks: List[Task] = tasks
+        self._task_by_id: Dict[str, Task] = {t.id: t for t in tasks}
+
+        self._scheduled: Dict[str, ScheduledTask] = {}
+        self._last_schedule_meta: Dict[str, Any] = {}
+
+        self._validate_unique_ids()
+        self._validate_dependency_refs()
+
+    # -----------------------------
+    # Construction / Loading
+    # -----------------------------
+
+    @classmethod
+    def from_csv(cls, path: str) -> "Gantt":
+        """
+        Load and normalize tasks from the Mindtrace/Adient-style CSV.
+
+        Handles:
+        - "metadata row" (row 0) that labels columns like Billable/Wall and role headers
+        - forward-filling Phase
+        - Task ID normalization as string
+        - Dependencies parsing (comma-separated)
+        - Role columns (PM, Sales, etc.) captured into Task.roles
+
+        Example::
+            g = Gantt.from_csv("/path/to/AI_Deployment_Master_Task_Checklist.csv")
+        """
+        rows = cls._read_csv_rows(path)
+        if not rows:
+            return cls([])
+
+        # Detect and drop metadata header row if it looks like your file:
+        # It contains "Billable" in Expected Time (Days) and "Wall" in an unnamed column.
+        header = rows[0]
+        data_rows = rows[1:]
+
+        # If there's an obvious metadata row, use it to rename columns
+        # e.g. header["Expected Time (Days)"] == "Billable"
+        # and header["Unnamed: 7"] == "Wall"
+        renamed_header = dict(header)  # metadata row values
+        colnames = list(renamed_header.keys())
+
+        # Rebuild a "true header" map: original columns -> normalized column names
+        # We'll treat the first real data row as having those original columns.
+        # Normalize known fields.
+        norm_map = cls._build_normalization_map(renamed_header)
+
+        tasks: List[Task] = []
+        current_phase = ""
+
+        for r in data_rows:
+            # Skip completely empty rows
+            if all((v or "").strip() == "" for v in r.values()):
+                continue
+
+            phase = (r.get("Phase") or "").strip()
+            if phase:
+                current_phase = phase
+            phase = current_phase
+
+            raw_id = (r.get("Task ID") or "").strip()
+            if not raw_id:
+                # If no ID, skip (or could auto-generate)
+                continue
+            task_id = cls._normalize_task_id(raw_id)
+
+            name = (r.get("Task") or "").strip()
+            details = (r.get("Details") or "").strip()
+            milestone = (r.get("Milestone / Output") or "").strip()
+
+            # durations
+            billable = cls._to_float(r.get(norm_map["billable_days_src"], "0"))
+            wall = cls._to_float(r.get(norm_map["wall_days_src"], "0"))
+
+            # dependencies
+            deps_raw = (r.get("Dependencies") or "").strip()
+            deps = tuple(cls._parse_dependencies(deps_raw))
+
+            # roles: collect anything in role columns (if present)
+            roles: Dict[str, Any] = {}
+            for src_col, role_key in norm_map.get("role_cols", {}).items():
+                val = (r.get(src_col) or "").strip()
+                if val != "":
+                    roles[role_key] = val
+
+            notes = (r.get(norm_map.get("notes_src", ""), "") or "").strip()
+
+            tasks.append(
+                Task(
+                    id=task_id,
+                    phase=phase,
+                    name=name,
+                    details=details,
+                    milestone_or_output=milestone,
+                    dependencies=deps,
+                    wall_days=wall,
+                    billable_days=billable,
+                    roles=roles,
+                    notes=notes,
+                )
+            )
+
+        return cls(tasks)
+
+    @staticmethod
+    def _read_csv_rows(path: str) -> List[Dict[str, str]]:
+        """
+        Read CSV into a list of row dicts with *stable, unique* column names.
+
+        This CSV contains multiple blank column headers (""), and csv.DictReader
+        will overwrite duplicate keys, causing us to lose important columns
+        (notably the "Wall" duration column).
+
+        Strategy:
+        - Read the first row as raw headers.
+        - Replace blank headers with pandas-like "Unnamed: {idx}" names.
+        - De-duplicate repeated headers by appending ".{n}" suffixes.
+        - Map subsequent rows onto these stable headers.
+        """
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        if not rows:
+            return []
+
+        raw_headers = rows[0]
+        headers: List[str] = []
+        seen: Dict[str, int] = {}
+
+        for idx, h in enumerate(raw_headers):
+            name = (h or "").strip()
+            if name == "":
+                name = f"Unnamed: {idx}"
+
+            if name in seen:
+                seen[name] += 1
+                name = f"{name}.{seen[name]}"
+            else:
+                seen[name] = 0
+
+            headers.append(name)
+
+        out: List[Dict[str, str]] = []
+        for row in rows[1:]:
+            d: Dict[str, str] = {}
+            for i, col in enumerate(headers):
+                d[col] = row[i] if i < len(row) else ""
+            out.append(d)
+
+        return out
+
+    @staticmethod
+    def _build_normalization_map(metadata_row: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Creates a mapping that tells us where the billable/wall columns really are
+        and captures role columns from the metadata row.
+        """
+        # Detect the Billable/Wall source columns from the metadata row values.
+        # (Row 2 of the CSV contains the strings "Billable" and "Wall".)
+        billable_src = next(
+            (col for col, val in metadata_row.items() if (val or "").strip().lower() == "billable"),
+            "Expected Time (Days)",
+        )
+        wall_src = next(
+            (col for col, val in metadata_row.items() if (val or "").strip().lower() == "wall"),
+            "Unnamed: 7",
+        )
+
+        # Identify role columns by reading the metadata row values
+        role_cols: Dict[str, str] = {}
+        for col, val in metadata_row.items():
+            v = (val or "").strip()
+            if v in {"PM", "Sales", "Tech Lead", "Onsite Engr", "CAD", "Engr", "Integrator", "Client"}:
+                # Normalize role keys to snake_case for frontend friendliness
+                key = re.sub(r"[^a-zA-Z0-9]+", "_", v).strip("_").lower()
+                role_cols[col] = key
+
+        # Notes column heuristic: last unnamed column sometimes used
+        notes_src = "Unnamed: 19" if "Unnamed: 19" in metadata_row else ""
+
+        return {
+            "billable_days_src": billable_src,
+            "wall_days_src": wall_src,
+            "role_cols": role_cols,
+            "notes_src": notes_src,
+        }
+
+    @staticmethod
+    def _normalize_task_id(raw: str) -> str:
+        # Preserve strings like "1.10" and "2.0" without float coercion
+        s = raw.strip()
+        # If it looks like a number but came as "1.0", keep "1.0" (it is an ID)
+        return s
+
+    @staticmethod
+    def _to_float(x: Any) -> float:
+        s = ("" if x is None else str(x)).strip()
+        if s in {"", "-", "—"}:
+            return 0.0
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    @staticmethod
+    def _parse_dependencies(dep_str: str) -> List[str]:
+        if not dep_str or dep_str in {"-", "—"}:
+            return []
+        parts = [p.strip() for p in dep_str.split(",")]
+        return [p for p in parts if p]
+
+    # -----------------------------
+    # Validation
+    # -----------------------------
+
+    def _validate_unique_ids(self) -> None:
+        seen: Set[str] = set()
+        dups: List[str] = []
+        for t in self._tasks:
+            if t.id in seen:
+                dups.append(t.id)
+            seen.add(t.id)
+        if dups:
+            raise ValueError(f"Duplicate Task IDs found: {sorted(set(dups))}")
+
+    def _validate_dependency_refs(self) -> None:
+        missing: Dict[str, List[str]] = {}
+        for t in self._tasks:
+            for dep in t.dependencies:
+                if dep not in self._task_by_id:
+                    missing.setdefault(t.id, []).append(dep)
+        if missing:
+            # Don't fail silently; frontend needs to show this clearly.
+            msg = ", ".join(f"{k} -> {v}" for k, v in missing.items())
+            raise ValueError(f"Missing dependency references: {msg}")
+
+    # -----------------------------
+    # Public API
+    # -----------------------------
+
+    @property
+    def tasks(self) -> List[Task]:
+        return list(self._tasks)
+
+    def schedule(
+        self,
+        start_date: DateLike,
+        *,
+        duration_mode: str = "wall",
+        working_days: bool = False,
+        weekmask: Tuple[int, ...] = (0, 1, 2, 3, 4),  # Mon-Fri (0=Mon)
+    ) -> None:
+        """
+        Compute schedule + row layout.
+
+        Parameters
+        ----------
+        start_date:
+            Project start date. Can be date, datetime, or ISO string "YYYY-MM-DD".
+        duration_mode:
+            "wall" (default) or "billable".
+        working_days:
+            If True, treat durations as working days (using weekmask).
+        weekmask:
+            Which weekdays count as working days when working_days=True.
+
+        Example::
+            g.schedule("2026-01-05")  # uses wall days by default
+            g.schedule("2026-01-05", duration_mode="billable")
+            g.schedule("2026-01-05", working_days=True)  # Mon-Fri by default
+        """
+        start = self._coerce_date(start_date)
+
+        dur_getter = {
+            "wall": lambda t: t.wall_days,
+            "billable": lambda t: t.billable_days,
+        }.get(duration_mode)
+
+        if dur_getter is None:
+            raise ValueError("duration_mode must be 'wall' or 'billable'")
+
+        order = self._topological_order()
+
+        scheduled: Dict[str, ScheduledTask] = {}
+
+        # For now, row order follows topo order (stable + intuitive).
+        # Later, we can pack rows by phase or try to minimize crossings/overlaps.
+        for row_idx, task_id in enumerate(order):
+            t = self._task_by_id[task_id]
+            duration_raw = dur_getter(t)
+            duration_days = max(0, int(math.ceil(duration_raw)))
+
+            # Earliest start is project start OR day after max(dep end)
+            est = start
+            if t.dependencies:
+                dep_end = max(scheduled[d].end for d in t.dependencies)
+                est = self._add_days(dep_end, 1, working_days=working_days, weekmask=weekmask)
+
+            # If duration is 0, end == start - 1 is awkward; we make end == start (zero-length bar).
+            if duration_days <= 0:
+                task_start = est
+                task_end = est
+            else:
+                task_start = est
+                task_end = self._add_days(task_start, duration_days - 1, working_days=working_days, weekmask=weekmask)
+
+            offset = self._days_between(start, task_start, working_days=working_days, weekmask=weekmask)
+
+            scheduled[task_id] = ScheduledTask(
+                task=t,
+                start=task_start,
+                end=task_end,
+                start_offset_days=offset,
+                duration_days=max(1, duration_days) if duration_days > 0 else 0,
+                row=row_idx,
+            )
+
+        self._scheduled = scheduled
+        self._last_schedule_meta = {
+            "project_start": start.isoformat(),
+            "duration_mode": duration_mode,
+            "working_days": working_days,
+            "weekmask": weekmask,
+        }
+
+    def export_layout(self) -> Dict[str, Any]:
+        """
+        Export a JSON-serializable dict for the frontend.
+
+        Returns:
+        - schedule metadata
+        - tasks with layout coordinates in "days from project start"
+        - dependency edges
+
+        Example::
+            g.schedule("2026-01-05")
+            payload = g.export_layout()
+        """
+        if not self._scheduled:
+            raise RuntimeError("No schedule computed. Call schedule(...) first.")
+
+        tasks_out: List[Dict[str, Any]] = []
+        edges_out: List[Dict[str, str]] = []
+
+        for st in sorted(self._scheduled.values(), key=lambda x: x.row):
+            t = st.task
+            tasks_out.append(
+                {
+                    "id": t.id,
+                    "phase": t.phase,
+                    "name": t.name,
+                    "details": t.details,
+                    "milestone_or_output": t.milestone_or_output,
+                    "dependencies": list(t.dependencies),
+                    "roles": dict(t.roles),
+                    "notes": t.notes,
+                    "durations": {"wall": t.wall_days, "billable": t.billable_days},
+                    "schedule": {
+                        "start": st.start.isoformat(),
+                        "end": st.end.isoformat(),
+                        "row": st.row,
+                        "x": st.start_offset_days,
+                        "w": st.duration_days,  # bar width in day units
+                    },
+                }
+            )
+            for dep in t.dependencies:
+                edges_out.append({"from": dep, "to": t.id})
+
+        return {
+            "meta": dict(self._last_schedule_meta),
+            "tasks": tasks_out,
+            "edges": edges_out,
+        }
+
+    # -----------------------------
+    # Graph utilities
+    # -----------------------------
+
+    def _topological_order(self) -> List[str]:
+        """
+        Kahn's algorithm with cycle detection.
+        """
+        indeg: Dict[str, int] = {t.id: 0 for t in self._tasks}
+        out: Dict[str, List[str]] = {t.id: [] for t in self._tasks}
+
+        for t in self._tasks:
+            for d in t.dependencies:
+                out[d].append(t.id)
+                indeg[t.id] += 1
+
+        queue: List[str] = [tid for tid, deg in indeg.items() if deg == 0]
+        # Stable ordering: sort by numeric-ish Task ID segments (best effort)
+        queue.sort(key=self._sort_key_task_id)
+
+        order: List[str] = []
+        while queue:
+            n = queue.pop(0)
+            order.append(n)
+            for m in out[n]:
+                indeg[m] -= 1
+                if indeg[m] == 0:
+                    queue.append(m)
+                    queue.sort(key=self._sort_key_task_id)
+
+        if len(order) != len(self._tasks):
+            # Find a cycle hint
+            remaining = [tid for tid, deg in indeg.items() if deg > 0]
+            raise ValueError(f"Dependency cycle detected among tasks: {remaining}")
+
+        return order
+
+    @staticmethod
+    def _sort_key_task_id(task_id: str) -> Tuple:
+        # Split "2.10" into (2,10) where possible, otherwise fallback string
+        parts = task_id.split(".")
+        key: List[Any] = []
+        for p in parts:
+            if p.isdigit():
+                key.append(int(p))
+            else:
+                key.append(p)
+        return tuple(key)
+
+    # -----------------------------
+    # Date helpers
+    # -----------------------------
+
+    @staticmethod
+    def _coerce_date(d: DateLike) -> date:
+        if isinstance(d, date) and not isinstance(d, datetime):
+            return d
+        if isinstance(d, datetime):
+            return d.date()
+        if isinstance(d, str):
+            return date.fromisoformat(d)
+        raise TypeError(f"Unsupported date type: {type(d)}")
+
+    @staticmethod
+    def _add_days(
+        start: date,
+        days: int,
+        *,
+        working_days: bool,
+        weekmask: Tuple[int, ...],
+    ) -> date:
+        if days <= 0:
+            return start
+        if not working_days:
+            return start + timedelta(days=days)
+
+        cur = start
+        added = 0
+        while added < days:
+            cur = cur + timedelta(days=1)
+            if cur.weekday() in weekmask:
+                added += 1
+        return cur
+
+    @staticmethod
+    def _days_between(
+        start: date,
+        end: date,
+        *,
+        working_days: bool,
+        weekmask: Tuple[int, ...],
+    ) -> int:
+        if end <= start:
+            return 0
+        if not working_days:
+            return (end - start).days
+
+        cur = start
+        count = 0
+        while cur < end:
+            cur = cur + timedelta(days=1)
+            if cur.weekday() in weekmask:
+                count += 1
+        return count
