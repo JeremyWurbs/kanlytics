@@ -3,6 +3,7 @@ export type LayoutMeta = {
   duration_mode: "wall" | "billable" | string;
   working_days: boolean;
   weekmask?: number[];
+  critical_path?: string[];
 };
 
 export type TaskLayout = {
@@ -36,6 +37,8 @@ export type TaskItem = {
   durations?: { wall: number; billable: number };
   start_date?: string | null;
   end_date?: string | null;
+  slack_days?: number;
+  is_critical?: boolean;
   schedule: TaskLayout;
 };
 

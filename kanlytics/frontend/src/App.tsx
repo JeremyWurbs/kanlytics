@@ -24,8 +24,7 @@ export default function App() {
   });
 
   const [kanlyticsOpen, setKanlyticsOpen] = useState<boolean>(true);
-  const [githubOpen, setGithubOpen] = useState<boolean>(true);
-  const [sourceOpen, setSourceOpen] = useState<boolean>(true);
+  const [dataOpen, setDataOpen] = useState<boolean>(true);
   const [ganttSettingsOpen, setGanttSettingsOpen] = useState<boolean>(true);
   const [viewOptionsOpen, setViewOptionsOpen] = useState<boolean>(true);
   const [fileName, setFileName] = useState<string>("");
@@ -51,6 +50,13 @@ export default function App() {
   const [projectUrl, setProjectUrl] = useState<string>(() => {
     try {
       return window.localStorage.getItem("kanlytics.github.projectUrl") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [issueRepo, setIssueRepo] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem("kanlytics.github.issueRepo") || "";
     } catch {
       return "";
     }
@@ -171,6 +177,11 @@ export default function App() {
     } catch {
       // ignore
     }
+    try {
+      window.localStorage.setItem("kanlytics.github.issueRepo", issueRepo.trim());
+    } catch {
+      // ignore
+    }
 
     setBusy(true);
     setErr("");
@@ -178,7 +189,7 @@ export default function App() {
     resetGithubProgress();
     try {
       setGithubJobMessage("Starting export…");
-      const started = await startExportProject({ planId, projectUrl: url });
+      const started = await startExportProject({ planId, projectUrl: url, issueRepo: issueRepo.trim() || undefined });
       setGithubJobId(started.job_id);
     } catch (e: any) {
       showToast("error", e?.message || String(e));
@@ -389,7 +400,7 @@ export default function App() {
         {/* Panels (collapsible) */}
         {kanlyticsOpen ? (
           <>
-            {/* GitHub panel */}
+            {/* Data panel */}
             <div
               style={{
                 border: "1px solid var(--border)",
@@ -400,8 +411,8 @@ export default function App() {
             >
               <button
                 type="button"
-                onClick={() => setGithubOpen((v) => !v)}
-                aria-expanded={githubOpen}
+                onClick={() => setDataOpen((v) => !v)}
+                aria-expanded={dataOpen}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -412,61 +423,17 @@ export default function App() {
                   cursor: "pointer",
                   fontWeight: 700,
                   color: "var(--text)",
-                  marginBottom: githubOpen ? 10 : 0,
+                  marginBottom: dataOpen ? 10 : 0,
                 }}
-                title={githubOpen ? "Collapse GitHub" : "Expand GitHub"}
+                title={dataOpen ? "Collapse Data" : "Expand Data"}
               >
                 <span className="mono" aria-hidden="true">
-                  {githubOpen ? "▾" : "▸"}
+                  {dataOpen ? "▾" : "▸"}
                 </span>
-                <span>GitHub</span>
+                <span>Data</span>
               </button>
 
-              {githubOpen ? (
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <button type="button" onClick={() => openGithubModal("connect")} disabled={busy} style={secondaryButtonStyle}>
-                    Connect
-                  </button>
-                  <button type="button" onClick={() => openGithubModal("export")} disabled={busy || !planId} style={secondaryButtonStyle}>
-                    Export
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            {/* Project Source panel */}
-            <div
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 14,
-                padding: 12,
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setSourceOpen(v => !v)}
-                aria-expanded={sourceOpen}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: 0,
-                  border: "none",
-                  background: "transparent",
-                  cursor: "pointer",
-                  fontWeight: 700,
-                  color: "var(--text)",
-                  marginBottom: sourceOpen ? 10 : 0,
-                }}
-                title={sourceOpen ? "Collapse Source" : "Expand Source"}
-              >
-                <span className="mono" aria-hidden="true">
-                  {sourceOpen ? "▾" : "▸"}
-                </span>
-                <span>Project Source</span>
-              </button>
-
-              {sourceOpen ? (
+              {dataOpen ? (
                 <>
                   <input
                     ref={fileInputRef}
@@ -478,28 +445,44 @@ export default function App() {
                       if (f) void handleFile(f);
                     }}
                   />
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      style={{ background: "var(--card)", color: "var(--text)", border: "1px solid var(--border-2)" }}
-                    >
-                      Load CSV
-                    </button>
-                    <button
-                      type="button"
-                      onClick={saveCsv}
-                      disabled={!hasCsv}
-                      style={{ background: "var(--card)", color: "var(--text)", border: "1px solid var(--border-2)" }}
-                    >
-                      Save CSV
-                    </button>
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                      gap: 16,
+                      alignItems: "start",
+                    }}
+                  >
+                    <div style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 12 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 10, color: "var(--text)" }}>CSV</div>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={busy} style={secondaryButtonStyle}>
+                          Import CSV
+                        </button>
+                        <button type="button" onClick={saveCsv} disabled={busy || !hasCsv} style={secondaryButtonStyle}>
+                          Export CSV
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 12 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 10, color: "var(--text)" }}>GitHub</div>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button type="button" onClick={() => openGithubModal("connect")} disabled={busy} style={secondaryButtonStyle}>
+                          Pull
+                        </button>
+                        <button type="button" onClick={() => openGithubModal("export")} disabled={busy || !planId} style={secondaryButtonStyle}>
+                          Push
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </>
               ) : null}
             </div>
 
-            {/* Gantt Settings panel */}
+            {/* Project Settings panel */}
             <div
               style={{
                 marginTop: 12,
@@ -529,7 +512,7 @@ export default function App() {
                 <span className="mono" aria-hidden="true">
                   {ganttSettingsOpen ? "▾" : "▸"}
                 </span>
-                <span>Gantt Settings</span>
+                <span>Project Settings</span>
               </button>
 
               {ganttSettingsOpen ? (
@@ -537,6 +520,13 @@ export default function App() {
                   <div style={{ minWidth: 170 }}>
                     <div className="label">Project start date</div>
                     <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                  </div>
+                  <div style={{ minWidth: 200 }}>
+                    <div className="label">Working days</div>
+                    <select value={workingDays ? "yes" : "no"} onChange={(e) => setWorkingDays(e.target.value === "yes")}>
+                      <option value="no">Calendar days</option>
+                      <option value="yes">Mon–Fri</option>
+                    </select>
                   </div>
                 </div>
               ) : null}
@@ -589,14 +579,6 @@ export default function App() {
                     <select value={durationMode} onChange={(e) => setDurationMode(e.target.value as any)}>
                       <option value="wall">Wall</option>
                       <option value="billable">Billable</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <div className="label">Working days</div>
-                    <select value={workingDays ? "yes" : "no"} onChange={(e) => setWorkingDays(e.target.value === "yes")}>
-                      <option value="no">Calendar days</option>
-                      <option value="yes">Mon–Fri</option>
                     </select>
                   </div>
 
@@ -745,6 +727,21 @@ export default function App() {
               placeholder="https://github.com/orgs/<org>/projects/<number>"
               disabled={Boolean(githubJobId)}
             />
+
+            {githubModalMode === "export" ? (
+              <div style={{ marginTop: 12 }}>
+                <div className="label">Issue repo (optional)</div>
+                <input
+                  value={issueRepo}
+                  onChange={(e) => setIssueRepo(e.target.value)}
+                  placeholder="owner/repo or https://github.com/owner/repo"
+                  disabled={Boolean(githubJobId)}
+                />
+                <div className="small" style={{ marginTop: 6 }}>
+                  If provided, tasks without a GitHub issue URL will be created as real issues in this repo (instead of Draft Issues).
+                </div>
+              </div>
+            ) : null}
             <div className="small" style={{ marginTop: 8 }}>
               {githubModalMode === "connect"
                 ? "Connect will download the project items (issues + drafts), ensure each has a Task ID, and load them into Kanlytics."

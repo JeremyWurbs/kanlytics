@@ -60,10 +60,11 @@ export async function startConnectProject(projectUrl: string): Promise<StartJobR
   return postJson<StartJobResponse>("github.connect_project_start", { project_url: projectUrl });
 }
 
-export async function startExportProject(params: { planId: string; projectUrl: string }): Promise<StartJobResponse> {
+export async function startExportProject(params: { planId: string; projectUrl: string; issueRepo?: string }): Promise<StartJobResponse> {
   return postJson<StartJobResponse>("github.export_project_start", {
     plan_id: params.planId,
     project_url: params.projectUrl,
+    issue_repo: params.issueRepo,
   });
 }
 
