@@ -9,6 +9,7 @@ dependencies = [
     "mindtrace>=0.6.0",
     "mindtrace-core>=0.4.0",
     "psutil>=7.1.3",
+    "pydantic>=2.0.0",
     "requests>=2.32.5",
     "tqdm>=4.67.1",
 ]

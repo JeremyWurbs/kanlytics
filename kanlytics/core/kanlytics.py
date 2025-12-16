@@ -603,7 +603,8 @@ class Kanlytics:
     
     def get_issues_by_assignee(self, assignee: str) -> List[GitHubIssue]:
         """Get all issues assigned to a specific user."""
-        return [i for i in self.issues if any(a.get('login', '').lower() == assignee.lower() for a in i.assignees)]
+        needle = assignee.lower()
+        return [i for i in self.issues if any((a or "").lower() == needle for a in i.assignees)]
     
     def get_issues_with_time_estimates(self) -> List[GitHubIssue]:
         """Get all issues that have time estimates."""
@@ -611,7 +612,8 @@ class Kanlytics:
     
     def get_issues_by_label(self, label: str) -> List[GitHubIssue]:
         """Get all issues with a specific label."""
-        return [i for i in self.issues if any(l.get('name', '').lower() == label.lower() for l in i.labels)]
+        needle = label.lower()
+        return [i for i in self.issues if any((l or "").lower() == needle for l in i.labels)]
     
     def get_issues_by_repository(self, repo_name: str) -> List[GitHubIssue]:
         """Get all issues from a specific repository (for project boards)."""
@@ -625,7 +627,7 @@ class Kanlytics:
         for issue in issues:
             if issue.assignees:
                 for assignee in issue.assignees:
-                    name = assignee.get("login", "Unknown")
+                    name = assignee or "Unknown"
                     distribution[name] = distribution.get(name, 0) + 1
             else:
                 distribution["Unassigned"] = distribution.get("Unassigned", 0) + 1
