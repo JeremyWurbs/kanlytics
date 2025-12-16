@@ -3,7 +3,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class GitHubIssue(BaseModel):
@@ -33,11 +33,14 @@ class GitHubIssue(BaseModel):
         description="Stable task identifier (recommend a locally generated UUID). Used for dependency edges and round-tripping.",
     )
 
-    # Template identifier (stable across projects). Used only for template->project instantiation.
-    template_task_id: Optional[str] = Field(
+    # Human-friendly identifier for display + ordering (e.g. 3.2, 5.1, 5.5).
+    # In templates this is required and is the ground truth for dependencies.
+    # We accept the old column name "Template Task ID" for compatibility.
+    display_task_id: Optional[str] = Field(
         default=None,
-        alias="Template Task ID",
-        description="Stable template identifier (e.g. 1.1, 2.7, etc.) used in reusable CSV templates.",
+        validation_alias=AliasChoices("Display Task ID", "Template Task ID"),
+        serialization_alias="Display Task ID",
+        description="Human-friendly display identifier (e.g. 3.2). Required in templates; used for ordering and presentation.",
     )
 
     # Canonical ID used internally by the library/scheduler.
@@ -99,10 +102,13 @@ class GitHubIssue(BaseModel):
         description="Upstream dependency IDs (prefer full issue URLs when sourced from GitHub).",
     )
 
-    template_dependencies: List[str] = Field(
+    # Optional: display-level dependencies (for templates / human editing).
+    # We accept the old "Template Dependencies" header for compatibility.
+    display_dependencies: List[str] = Field(
         default_factory=list,
-        alias="Template Dependencies",
-        description="Template dependency identifiers (references Template Task ID values). Used only for template instantiation.",
+        validation_alias=AliasChoices("Display Dependencies", "Template Dependencies"),
+        serialization_alias="Display Dependencies",
+        description="Human-friendly dependency identifiers (references Display Task ID values).",
     )
 
     # Durations (calendar/working interpretation is a scheduling concern)
@@ -146,9 +152,9 @@ class GitHubIssue(BaseModel):
         s = str(v).strip()
         return s if s else None
 
-    @field_validator("template_task_id", mode="before")
+    @field_validator("display_task_id", mode="before")
     @classmethod
-    def _strip_template_task_id(cls, v: Any) -> Any:
+    def _strip_display_task_id(cls, v: Any) -> Any:
         if v is None:
             return None
         s = str(v).strip()
@@ -203,7 +209,7 @@ class GitHubIssue(BaseModel):
         except ValueError as e:
             raise ValueError(f"Invalid day value: {v!r}") from e
 
-    @field_validator("dependencies", "template_dependencies", mode="before")
+    @field_validator("dependencies", "display_dependencies", mode="before")
     @classmethod
     def _normalize_dependencies(cls, v: Any) -> List[str]:
         """
@@ -380,10 +386,14 @@ class GitHubIssue(BaseModel):
         if d.get("task_id") in (None, ""):
             d["task_id"] = str(uuid4())
 
-        # Ensure we retain template_task_id if provided via alias
-        raw_template_id = d.get("template_task_id") if "template_task_id" in d else d.get("Template Task ID")
-        if d.get("template_task_id") in (None, "") and raw_template_id not in (None, ""):
-            d["template_task_id"] = raw_template_id
+        # Ensure we retain display_task_id if provided via alias
+        raw_display_id = (
+            d.get("display_task_id")
+            if "display_task_id" in d
+            else d.get("Display Task ID", d.get("Template Task ID"))
+        )
+        if d.get("display_task_id") in (None, "") and raw_display_id not in (None, ""):
+            d["display_task_id"] = raw_display_id
 
         # Canonical internal ID is always Task ID (stable dependency key).
         if raw_id not in (None, "") and str(raw_id).strip() not in (None, ""):

@@ -71,10 +71,10 @@ class Gantt:
         Load tasks from the V2 template CSV format (single header row).
 
         Template workflow (Option A):
-        - `Template Task ID` is a stable, human-friendly identifier used only in templates.
+        - `Display Task ID` is a stable, human-friendly identifier used in templates (e.g. 3.2).
         - `Task ID` is a UUID that is generated the first time a template is instantiated.
-        - `Template Dependencies` references template IDs; on first load, we remap them
-          into UUID `Dependencies` using the generated `Task ID`s.
+        - In templates, `Dependencies` may reference Display Task IDs; on first load,
+          we remap them into UUID `Dependencies` using the generated `Task ID`s.
 
         Example::
             g = Gantt.from_csv("/path/to/template.csv")
@@ -89,8 +89,8 @@ class Gantt:
         def get(r: Dict[str, Any], key: str) -> str:
             return (r.get(key) or "").strip()
 
-        # Pass 1: determine/generate UUID Task IDs and build template-id mapping
-        template_to_task: Dict[str, str] = {}
+        # Pass 1: determine/generate UUID Task IDs and build display-id mapping
+        display_to_task: Dict[str, str] = {}
         items: List[Dict[str, Any]] = []
 
         for r in rows:
@@ -98,42 +98,55 @@ class Gantt:
             if all((v or "").strip() == "" for v in r.values()):
                 continue
 
-            template_id = get(r, "Template Task ID")
-            task_id = get(r, "Task ID")
+            display_id = get(r, "Display Task ID") or get(r, "Template Task ID")
+            raw_task_id = get(r, "Task ID")
+            task_id = raw_task_id
 
-            if template_id == "" and task_id == "":
-                raise ValueError("Each row must have at least 'Template Task ID' or 'Task ID'")
+            if display_id == "" and task_id == "":
+                raise ValueError("Each row must have at least 'Display Task ID' (or legacy 'Template Task ID') or 'Task ID'")
 
             # If Task ID is missing, GitHubIssue will auto-generate it, but we need the
             # mapping now to remap template dependencies deterministically.
             if task_id == "":
                 task_id = str(uuid.uuid4())
 
-            if template_id:
-                if template_id in template_to_task and template_to_task[template_id] != task_id:
-                    raise ValueError(f"Duplicate Template Task ID with conflicting Task IDs: {template_id}")
-                template_to_task[template_id] = task_id
+            if display_id:
+                if display_id in display_to_task and display_to_task[display_id] != task_id:
+                    raise ValueError(f"Duplicate Display Task ID with conflicting Task IDs: {display_id}")
+                display_to_task[display_id] = task_id
 
-            items.append({"row": r, "template_id": template_id, "task_id": task_id})
+            items.append(
+                {
+                    "row": r,
+                    "display_id": display_id,
+                    "task_id": task_id,
+                    "had_task_id": bool(raw_task_id),
+                }
+            )
 
         # Pass 2: remap dependencies and build GitHubIssue objects
         tasks: List[GitHubIssue] = []
         for it in items:
             r = it["row"]
-            template_id = it["template_id"]
+            display_id = it["display_id"]
             task_id = it["task_id"]
+            had_task_id = it["had_task_id"]
 
             deps_uuid: List[str] = []
             deps_raw = get(r, "Dependencies")
-            tmpl_deps_raw = get(r, "Template Dependencies")
+            display_deps_raw = get(r, "Display Dependencies") or get(r, "Template Dependencies")
 
-            if deps_raw:
+            if had_task_id:
+                # Instantiated project CSV: dependencies are already canonical IDs (UUIDs/URLs).
                 deps_uuid = cls._parse_dependencies(deps_raw)
-            elif tmpl_deps_raw:
-                for dep in cls._parse_dependencies(tmpl_deps_raw):
-                    if dep not in template_to_task:
-                        raise ValueError(f"Missing Template Task ID referenced in Template Dependencies: {dep}")
-                    deps_uuid.append(template_to_task[dep])
+            else:
+                # Template CSV: treat deps as Display Task IDs and remap to UUID Task IDs.
+                # Prefer Dependencies column for template deps; fall back to Display/Template Dependencies if present.
+                src = deps_raw or display_deps_raw
+                for dep in cls._parse_dependencies(src):
+                    if dep not in display_to_task:
+                        raise ValueError(f"Missing Display Task ID referenced in Dependencies: {dep}")
+                    deps_uuid.append(display_to_task[dep])
 
             # Minimal role support in V2: either provide JSON-ish `roles` later, or keep columns.
             roles: Dict[str, Any] = {}
@@ -154,7 +167,7 @@ class Gantt:
             tasks.append(
                 GitHubIssue(
                     **{
-                        "Template Task ID": template_id,
+                        "Display Task ID": display_id,
                         "Task ID": task_id,
                         "phase": get(r, "phase"),
                         "title": get(r, "title"),
@@ -422,9 +435,13 @@ class Gantt:
 
         for st in sorted(self._scheduled.values(), key=lambda x: x.row):
             t = st.task
+            display_id = t.display_task_id or (str(t.number) if t.number is not None else "")
             tasks_out.append(
                 {
                     "id": t.id,
+                    "display_id": display_id,
+                    "display_task_id": t.display_task_id,
+                    "task_id": t.task_id,
                     "phase": t.phase,
                     "name": t.name or t.title,
                     "details": t.details,
@@ -450,6 +467,70 @@ class Gantt:
             "tasks": tasks_out,
             "edges": edges_out,
         }
+
+    def export_csv_v2(self) -> str:
+        """
+        Export the current plan as a V2 CSV (single header row).
+
+        This is primarily used to "instantiate" templates:
+        - If a template CSV had blank `Task ID`s, `from_csv` generates UUIDs.
+        - This method returns a normalized CSV containing those generated IDs
+          and UUID-based `Dependencies`, so the frontend can persist them.
+        """
+        import io
+
+        fieldnames = [
+            "Display Task ID",
+            "Task ID",
+            "url",
+            "number",
+            "state",
+            "phase",
+            "title",
+            "body",
+            "milestone_or_output",
+            "acceptance_criteria",
+            "Dependencies",
+            "start_date",
+            "end_date",
+            "wall_days",
+            "billable_days",
+            "Labels",
+            "Assignees",
+            "notes",
+            "status",
+        ]
+
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=fieldnames, lineterminator="\n")
+        w.writeheader()
+
+        for t in self._tasks:
+            w.writerow(
+                {
+                    "Display Task ID": t.display_task_id or "",
+                    "Task ID": t.task_id or "",
+                    "url": t.url or "",
+                    "number": "" if t.number is None else str(t.number),
+                    "state": t.state or "",
+                    "phase": t.phase or "",
+                    "title": t.title or t.name or "",
+                    "body": t.body or t.details or "",
+                    "milestone_or_output": t.milestone_or_output or "",
+                    "acceptance_criteria": t.acceptance_criteria or "",
+                    "Dependencies": ",".join(t.dependencies or []),
+                    "start_date": "" if t.start_date is None else t.start_date.isoformat(),
+                    "end_date": "" if t.end_date is None else t.end_date.isoformat(),
+                    "wall_days": "" if (t.wall_days or 0.0) == 0.0 else str(t.wall_days),
+                    "billable_days": "" if (t.billable_days or 0.0) == 0.0 else str(t.billable_days),
+                    "Labels": ",".join(t.labels or []),
+                    "Assignees": ",".join(t.assignees or []),
+                    "notes": t.notes or "",
+                    "status": "",
+                }
+            )
+
+        return buf.getvalue()
 
     # -----------------------------
     # Graph utilities

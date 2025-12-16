@@ -29,12 +29,19 @@ class CreatePlanInput(BaseModel):
       - We accept CSV as text so the frontend can upload directly.
       - The server parses/validates dependencies and stores the plan.
     """
-    csv_text: str = Field(..., description="Full CSV file contents as UTF-8 text.")
+    csv_text: str = Field(
+        ...,
+        description="Full CSV file contents as UTF-8 text (V2 single-header template format).",
+    )
 
 
 class CreatePlanOutput(BaseModel):
     plan_id: str
     task_count: int
+    normalized_csv_text: str = Field(
+        ...,
+        description="Normalized V2 CSV text with generated UUID Task IDs and UUID Dependencies (safe to save back to disk).",
+    )
 
 
 class ScheduleInput(BaseModel):
@@ -136,7 +143,11 @@ class GanttService(Service):
             # clear any old layout under same id (shouldn't happen, but safe)
             self._layouts.pop(plan_id, None)
 
-        return CreatePlanOutput(plan_id=plan_id, task_count=len(gantt.tasks))
+        return CreatePlanOutput(
+            plan_id=plan_id,
+            task_count=len(gantt.tasks),
+            normalized_csv_text=gantt.export_csv_v2(),
+        )
 
     def schedule(self, payload: ScheduleInput) -> ScheduleOutput:
         """
