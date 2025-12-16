@@ -57,6 +57,8 @@ class Gantt:
 
         self._scheduled: Dict[str, ScheduledTask] = {}
         self._last_schedule_meta: Dict[str, Any] = {}
+        self._slack_days_by_id: Dict[str, int] = {}
+        self._critical_path: List[str] = []
 
         self._validate_unique_ids()
         self._validate_dependency_refs()
@@ -407,11 +409,13 @@ class Gantt:
             )
 
         self._scheduled = scheduled
+        self._slack_days_by_id, self._critical_path = self._compute_slack_and_critical_path(order, scheduled)
         self._last_schedule_meta = {
             "project_start": start.isoformat(),
             "duration_mode": duration_mode,
             "working_days": working_days,
             "weekmask": weekmask,
+            "critical_path": list(self._critical_path),
         }
 
     def export_layout(self) -> Dict[str, Any]:
@@ -436,6 +440,7 @@ class Gantt:
         for st in sorted(self._scheduled.values(), key=lambda x: x.row):
             t = st.task
             display_id = t.display_task_id or (str(t.number) if t.number is not None else "")
+            slack_days = self._slack_days_by_id.get(t.id, 0)
             tasks_out.append(
                 {
                     "id": t.id,
@@ -460,6 +465,8 @@ class Gantt:
                     "durations": {"wall": t.wall_days, "billable": t.billable_days},
                     "start_date": None if t.start_date is None else t.start_date.isoformat(),
                     "end_date": None if t.end_date is None else t.end_date.isoformat(),
+                    "slack_days": slack_days,
+                    "is_critical": slack_days == 0,
                     "schedule": {
                         "start": st.start.isoformat(),
                         "end": st.end.isoformat(),
@@ -477,6 +484,87 @@ class Gantt:
             "tasks": tasks_out,
             "edges": edges_out,
         }
+
+    @staticmethod
+    def _compute_slack_and_critical_path(
+        order: List[str],
+        scheduled: Dict[str, ScheduledTask],
+    ) -> Tuple[Dict[str, int], List[str]]:
+        """
+        Compute CPM slack (in the same day units used by the schedule offsets) and return
+        a single deterministic critical path.
+
+        Definitions in this plan:
+          ES(task) = scheduled start_offset_days
+          DUR(task) = scheduled duration_days
+          EF(task) = ES + DUR            (finish boundary, exclusive)
+          ProjectFinish = max(EF)
+
+        Backward pass:
+          LF(task) = min(LS(successors)) for tasks with successors, else ProjectFinish
+          LS(task) = LF - DUR
+          Slack = LS - ES
+
+        Critical tasks have Slack == 0.
+        """
+        if not order:
+            return {}, []
+
+        # Build successor lists from the dependency graph (dep -> task).
+        succ: Dict[str, List[str]] = {tid: [] for tid in order}
+        pred: Dict[str, List[str]] = {tid: [] for tid in order}
+        for tid in order:
+            t = scheduled[tid].task
+            for d in t.dependencies:
+                if d in succ:
+                    succ[d].append(tid)
+                    pred[tid].append(d)
+
+        es: Dict[str, int] = {tid: scheduled[tid].start_offset_days for tid in order}
+        dur: Dict[str, int] = {tid: max(0, scheduled[tid].duration_days) for tid in order}
+        ef: Dict[str, int] = {tid: es[tid] + dur[tid] for tid in order}
+        project_finish = max(ef.values()) if ef else 0
+
+        lf: Dict[str, int] = {}
+        ls: Dict[str, int] = {}
+
+        for tid in reversed(order):
+            if succ[tid]:
+                lf_tid = min(ls[s] for s in succ[tid])
+            else:
+                lf_tid = project_finish
+            lf[tid] = lf_tid
+            ls[tid] = lf_tid - dur[tid]
+
+        slack: Dict[str, int] = {tid: max(0, ls[tid] - es[tid]) for tid in order}
+
+        # Deterministic critical path reconstruction:
+        # pick an end task that finishes at project_finish and is critical.
+        critical_end = [tid for tid in order if slack[tid] == 0 and ef[tid] == project_finish]
+        if not critical_end:
+            # No zero-slack tasks? (shouldn't happen unless empty durations)
+            return slack, []
+
+        # Use scheduled row as stable tiebreaker.
+        critical_end.sort(key=lambda tid: scheduled[tid].row)
+        cur = critical_end[0]
+        path_rev: List[str] = [cur]
+
+        # Walk backwards through critical predecessors that "touch" (EF(pred) == ES(cur)).
+        while True:
+            preds = [
+                p
+                for p in pred[cur]
+                if slack.get(p, 1) == 0 and ef.get(p) == es.get(cur)
+            ]
+            if not preds:
+                break
+            preds.sort(key=lambda tid: scheduled[tid].row)
+            cur = preds[0]
+            path_rev.append(cur)
+
+        path = list(reversed(path_rev))
+        return slack, path
 
     def export_csv_v2(self) -> str:
         """

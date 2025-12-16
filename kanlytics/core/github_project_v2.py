@@ -109,6 +109,35 @@ def parse_project_url(project_url: str) -> ProjectRef:
     return ProjectRef(scope=parts[0], owner=owner, number=number)
 
 
+def parse_repo_ref(repo: str) -> Tuple[str, str]:
+    """
+    Accepts:
+      - "owner/repo"
+      - "https://github.com/owner/repo"
+    Returns:
+      (owner, repo)
+    """
+    s = (repo or "").strip()
+    if not s:
+        raise ValueError("Repo is required")
+    if s.startswith("http://") or s.startswith("https://"):
+        parsed = urlparse(s)
+        if parsed.netloc != "github.com":
+            raise ValueError("Repo URL must be on github.com")
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) < 2:
+            raise ValueError("Invalid GitHub repo URL format")
+        return parts[0], parts[1]
+    if "/" not in s:
+        raise ValueError("Repo must be in 'owner/repo' format (or a GitHub repo URL)")
+    owner, name = s.split("/", 1)
+    owner = owner.strip()
+    name = name.strip()
+    if not owner or not name:
+        raise ValueError("Repo must be in 'owner/repo' format")
+    return owner, name
+
+
 class GitHubProjectV2:
     def __init__(self, project_url: str, github_token: Optional[str] = None) -> None:
         self.project_url = project_url
@@ -220,6 +249,36 @@ class GitHubProjectV2:
         field_id = field.get("id")
         if not field_id:
             raise ValueError("Failed to create ProjectV2 text field")
+        return field_id
+
+    def ensure_date_field(self, name: str) -> str:
+        for f in self.list_fields():
+            if (f.get("name") or "").strip().lower() == name.strip().lower():
+                return f["id"]
+
+        mutation = """
+        mutation($input: CreateProjectV2FieldInput!) {
+          createProjectV2Field(input: $input) {
+            projectV2Field {
+              ... on ProjectV2FieldCommon { id name dataType }
+            }
+          }
+        }
+        """
+        data = self._graphql(
+            mutation,
+            {
+                "input": {
+                    "projectId": self.project_id,
+                    "name": name,
+                    "dataType": "DATE",
+                }
+            },
+        )
+        field = (((data.get("createProjectV2Field") or {}).get("projectV2Field")) or {})
+        field_id = field.get("id")
+        if not field_id:
+            raise ValueError("Failed to create ProjectV2 date field")
         return field_id
 
     def ensure_status_columns(self, *, options: List[str], default: str = "Backlog") -> Tuple[str, Dict[str, str]]:
@@ -378,6 +437,10 @@ class GitHubProjectV2:
                         text
                         field { ... on ProjectV2FieldCommon { id name } }
                       }
+                      ... on ProjectV2ItemFieldDateValue {
+                        date
+                        field { ... on ProjectV2FieldCommon { id name } }
+                      }
                       ... on ProjectV2ItemFieldSingleSelectValue {
                         name
                         field { ... on ProjectV2FieldCommon { id name } }
@@ -432,6 +495,20 @@ class GitHubProjectV2:
                 return val or None
         return None
 
+    @staticmethod
+    def _get_date_field_value(item: Dict[str, Any], field_name: str) -> Optional[str]:
+        fvs = ((item.get("fieldValues") or {}).get("nodes") or [])
+        for fv in fvs:
+            if not isinstance(fv, dict):
+                continue
+            field = fv.get("field") or {}
+            if (field.get("name") or "").strip().lower() != field_name.strip().lower():
+                continue
+            if "date" in fv:
+                val = (fv.get("date") or "").strip()
+                return val or None
+        return None
+
     def set_text_field(self, *, item_id: str, field_id: str, text: str) -> None:
         mutation = """
         mutation($input: UpdateProjectV2ItemFieldValueInput!) {
@@ -468,6 +545,26 @@ class GitHubProjectV2:
                     "itemId": item_id,
                     "fieldId": field_id,
                     "value": {"singleSelectOptionId": option_id},
+                }
+            },
+        )
+
+    def set_date_field(self, *, item_id: str, field_id: str, date: str) -> None:
+        mutation = """
+        mutation($input: UpdateProjectV2ItemFieldValueInput!) {
+          updateProjectV2ItemFieldValue(input: $input) {
+            projectV2Item { id }
+          }
+        }
+        """
+        self._graphql(
+            mutation,
+            {
+                "input": {
+                    "projectId": self.project_id,
+                    "itemId": item_id,
+                    "fieldId": field_id,
+                    "value": {"date": date},
                 }
             },
         )
@@ -573,6 +670,25 @@ class GitHubProjectV2:
             payload["assignees"] = assignees
         res = requests.patch(api, headers=self._headers, json=payload)
         res.raise_for_status()
+
+    def create_issue_rest(self, *, repo: str, title: str, body: str, labels: List[str], assignees: List[str]) -> str:
+        """
+        Create an Issue in the provided repo and return the HTML URL.
+        """
+        owner, name = parse_repo_ref(repo)
+        api = f"https://api.github.com/repos/{owner}/{name}/issues"
+        payload: Dict[str, Any] = {"title": title, "body": body}
+        if labels is not None:
+            payload["labels"] = labels
+        if assignees is not None:
+            payload["assignees"] = assignees
+        res = requests.post(api, headers=self._headers, json=payload)
+        res.raise_for_status()
+        data = res.json()
+        url = data.get("html_url")
+        if not url:
+            raise ValueError("Issue creation succeeded but no html_url returned")
+        return url
 
 
 def new_uuid() -> str:

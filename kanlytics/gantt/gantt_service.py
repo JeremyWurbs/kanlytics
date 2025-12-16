@@ -85,6 +85,10 @@ class ConnectProjectOutput(BaseModel):
 class ExportProjectInput(BaseModel):
     plan_id: str
     project_url: str = Field(..., description="GitHub ProjectV2 board URL (e.g. https://github.com/orgs/<org>/projects/<n>).")
+    issue_repo: Optional[str] = Field(
+        default=None,
+        description="Optional target repo ('owner/repo' or https://github.com/owner/repo) for creating missing issues.",
+    )
 
 
 class ExportProjectOutput(BaseModel):
@@ -135,6 +139,21 @@ layout_task = TaskSchema(
     name="gantt.layout",
     input_schema=LayoutInput,
     output_schema=LayoutOutput,
+)
+
+class CriticalPathInput(BaseModel):
+    plan_id: str
+
+
+class CriticalPathOutput(BaseModel):
+    plan_id: str
+    critical_path: list[str] = Field(..., description="Ordered list of task IDs on the critical path.")
+
+
+critical_path_task = TaskSchema(
+    name="gantt.critical_path",
+    input_schema=CriticalPathInput,
+    output_schema=CriticalPathOutput,
 )
 
 connect_project_task = TaskSchema(
@@ -204,6 +223,7 @@ class GanttService(Service):
         self.add_endpoint("gantt.create_plan", self.create_plan, schema=create_plan_task)
         self.add_endpoint("gantt.schedule", self.schedule, schema=schedule_task)
         self.add_endpoint("gantt.layout", self.get_layout, schema=layout_task)
+        self.add_endpoint("gantt.critical_path", self.get_critical_path, schema=critical_path_task)
         self.add_endpoint("github.connect_project", self.connect_project, schema=connect_project_task)
         self.add_endpoint("github.export_project", self.export_project, schema=export_project_task)
         self.add_endpoint("github.connect_project_start", self.connect_project_start, schema=connect_project_start_task)
@@ -269,6 +289,19 @@ class GanttService(Service):
             )
 
         return LayoutOutput(plan_id=payload.plan_id, layout=layout)
+
+    def get_critical_path(self, payload: CriticalPathInput) -> CriticalPathOutput:
+        with self._lock:
+            layout = self._layouts.get(payload.plan_id)
+
+        if layout is None:
+            raise ValueError(
+                f"No layout found for plan_id={payload.plan_id}. "
+                f"Did you call gantt.schedule first?"
+            )
+
+        critical_path = list((layout.get("meta") or {}).get("critical_path") or [])
+        return CriticalPathOutput(plan_id=payload.plan_id, critical_path=critical_path)
 
     def connect_project(self, payload: ConnectProjectInput) -> ConnectProjectOutput:
         """
@@ -449,13 +482,25 @@ class GanttService(Service):
         """
         with self._lock:
             gantt = self._plans.get(payload.plan_id)
+            layout = self._layouts.get(payload.plan_id)
 
         if gantt is None:
             raise ValueError(f"Unknown plan_id: {payload.plan_id}")
+        if layout is None:
+            raise ValueError(f"No layout found for plan_id={payload.plan_id}. Did you call gantt.schedule first?")
+
+        schedule_by_id: dict[str, dict[str, str]] = {}
+        for t in (layout.get("tasks") or []):
+            tid = t.get("id")
+            sch = t.get("schedule") or {}
+            if tid and sch.get("start") and sch.get("end"):
+                schedule_by_id[tid] = {"start": sch["start"], "end": sch["end"]}
 
         client = GitHubProjectV2(payload.project_url)
         status_field_id, status_option_ids = client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
         task_id_field_id = client.ensure_text_field("Task ID")
+        start_date_field_id = client.ensure_date_field("Start Date")
+        end_date_field_id = client.ensure_date_field("End Date")
 
         by_task_id: dict[str, dict[str, Any]] = {}
         by_issue_url: dict[str, dict[str, Any]] = {}
@@ -483,6 +528,8 @@ class GanttService(Service):
 
         out = ExportProjectOutput()
 
+        issue_repo = (payload.issue_repo or "").strip() or None
+
         for t in gantt.tasks:
             task_id = (t.task_id or t.id or "").strip()
             if not task_id:
@@ -497,10 +544,17 @@ class GanttService(Service):
 
             try:
                 desired_status = t.phase if (t.phase or "").strip() in status_option_ids else "Backlog"
+                sch = schedule_by_id.get(t.id) or {}
+                sch_start = sch.get("start")
+                sch_end = sch.get("end")
                 if rec:
                     # Ensure field is set (idempotent).
                     client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
                     client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
+                    if sch_start:
+                        client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=sch_start)
+                    if sch_end:
+                        client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=sch_end)
 
                     if rec["type"] == "Issue":
                         issue_url = t.url or rec.get("issue_url")
@@ -520,14 +574,42 @@ class GanttService(Service):
                         item_id = client.add_issue_item(issue_node_id=issue_node_id)
                         client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
                         client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                        if sch_start:
+                            client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                        if sch_end:
+                            client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
                         out.added_existing_issues += 1
                         # best-effort update to match local fields
                         client.update_issue_rest(issue_url=t.url, title=title or "(untitled)", body=body, labels=labels, assignees=assignees)
+                        out.updated_issues += 1
+                    elif issue_repo:
+                        # Create a real repo issue, add to project, then update fields.
+                        created_url = client.create_issue_rest(
+                            repo=issue_repo,
+                            title=title or "(untitled)",
+                            body=body,
+                            labels=labels,
+                            assignees=assignees,
+                        )
+                        owner, repo, number = client.parse_issue_url(created_url)
+                        issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                        item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                        if sch_start:
+                            client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                        if sch_end:
+                            client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
+                        out.added_existing_issues += 1
                         out.updated_issues += 1
                     else:
                         item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
                         client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
                         client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                        if sch_start:
+                            client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                        if sch_end:
+                            client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
                         out.created_draft_issues += 1
             except Exception as e:
                 out.errors.append(f"{task_id}: {e}")
@@ -549,14 +631,27 @@ class GanttService(Service):
 
                 with self._lock:
                     gantt = self._plans.get(payload.plan_id)
+                    layout = self._layouts.get(payload.plan_id)
                 if gantt is None:
                     raise ValueError(f"Unknown plan_id: {payload.plan_id}")
+                if layout is None:
+                    raise ValueError(f"No layout found for plan_id={payload.plan_id}. Did you call gantt.schedule first?")
+
+                schedule_by_id: dict[str, dict[str, str]] = {}
+                for t in (layout.get("tasks") or []):
+                    tid = t.get("id")
+                    sch = t.get("schedule") or {}
+                    if tid and sch.get("start") and sch.get("end"):
+                        schedule_by_id[tid] = {"start": sch["start"], "end": sch["end"]}
 
                 client = GitHubProjectV2(payload.project_url)
+                issue_repo = (payload.issue_repo or "").strip() or None
                 self._job_update(job_id, progress=3, message="Normalizing Status columns…")
                 status_field_id, status_option_ids = client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
                 self._job_update(job_id, progress=5, message="Ensuring Task ID field…")
                 task_id_field_id = client.ensure_text_field("Task ID")
+                start_date_field_id = client.ensure_date_field("Start Date")
+                end_date_field_id = client.ensure_date_field("End Date")
 
                 self._job_update(job_id, progress=12, message="Loading existing project items…")
                 items = list(client.iter_items())
@@ -603,9 +698,16 @@ class GanttService(Service):
 
                     try:
                         desired_status = t.phase if (t.phase or "").strip() in status_option_ids else "Backlog"
+                        sch = schedule_by_id.get(t.id) or {}
+                        sch_start = sch.get("start")
+                        sch_end = sch.get("end")
                         if rec:
                             client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
                             client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
+                            if sch_start:
+                                client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=sch_start)
+                            if sch_end:
+                                client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=sch_end)
 
                             if rec["type"] == "Issue":
                                 issue_url = t.url or rec.get("issue_url")
@@ -630,6 +732,10 @@ class GanttService(Service):
                                 item_id = client.add_issue_item(issue_node_id=issue_node_id)
                                 client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
                                 client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                                if sch_start:
+                                    client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                                if sch_end:
+                                    client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
                                 out.added_existing_issues += 1
                                 client.update_issue_rest(
                                     issue_url=t.url,
@@ -640,10 +746,34 @@ class GanttService(Service):
                                 )
                                 out.updated_issues += 1
                             else:
-                                item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
-                                client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
-                                client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
-                                out.created_draft_issues += 1
+                                if issue_repo:
+                                    created_url = client.create_issue_rest(
+                                        repo=issue_repo,
+                                        title=title or "(untitled)",
+                                        body=body,
+                                        labels=labels,
+                                        assignees=assignees,
+                                    )
+                                    owner, repo, number = client.parse_issue_url(created_url)
+                                    issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                                    item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                                    client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                    client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                                    if sch_start:
+                                        client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                                    if sch_end:
+                                        client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
+                                    out.added_existing_issues += 1
+                                    out.updated_issues += 1
+                                else:
+                                    item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
+                                    client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                    client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                                    if sch_start:
+                                        client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                                    if sch_end:
+                                        client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
+                                    out.created_draft_issues += 1
                     except Exception as e:
                         out.errors.append(f"{task_id}: {e}")
 
