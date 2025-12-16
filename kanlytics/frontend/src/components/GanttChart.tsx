@@ -158,9 +158,6 @@ export const GanttChart: React.FC<Props> = ({
   const [infoOpen, setInfoOpen] = useState<boolean>(true);
 
   const tasks = layout.tasks;
-  const leftHeaderRef = useRef<HTMLDivElement | null>(null);
-  const rightHeaderRef = useRef<HTMLDivElement | null>(null);
-  const [chartYOffset, setChartYOffset] = useState(0);
 
   const phases = useMemo(() => {
     const s = new Set<string>();
@@ -179,14 +176,11 @@ export const GanttChart: React.FC<Props> = ({
     });
   }, [tasks, search, phaseFilter]);
 
-  // Pick a sensible default selection.
+  // If the selected task disappears (new plan/filtering), clear selection.
   useEffect(() => {
-    if (!tasks.length) {
-      setSelectedId("");
-      return;
-    }
-    if (selectedId && tasks.some(t => t.id === selectedId)) return;
-    setSelectedId(tasks[0].id);
+    if (!selectedId) return;
+    if (tasks.some(t => t.id === selectedId)) return;
+    setSelectedId("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.length]);
 
@@ -433,7 +427,7 @@ export const GanttChart: React.FC<Props> = ({
             chartPadLeft,
             pxPerDay,
             rowHeight,
-            chartYOffset
+            0
           )
         : [],
     [
@@ -447,24 +441,9 @@ export const GanttChart: React.FC<Props> = ({
       chartPadLeft,
       pxPerDay,
       rowHeight,
-      chartYOffset,
       showDeps,
     ]
   );
-
-  // The left pane sticky header (search/filters) is taller than the right pane
-  // time-axis header. Without compensating, the SVG bars start "too high"
-  // compared to the left task rows. Measure and offset the SVG content.
-  useLayoutEffect(() => {
-    const compute = () => {
-      const leftH = leftHeaderRef.current?.getBoundingClientRect().height ?? 0;
-      const rightH = rightHeaderRef.current?.getBoundingClientRect().height ?? 0;
-      setChartYOffset(Math.max(0, leftH - rightH));
-    };
-    compute();
-    window.addEventListener("resize", compute);
-    return () => window.removeEventListener("resize", compute);
-  }, []);
 
   const ticks = useMemo(() => {
     const N = Math.ceil(width / pxPerDay);
@@ -510,10 +489,26 @@ export const GanttChart: React.FC<Props> = ({
     setInfoOpen(true);
   }
 
+  function clearSelection() {
+    setSelectedId("");
+    setInfoOpen(false);
+  }
+
+  // Escape closes the panel + clears selection (GitHub-style).
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") clearSelection();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const infoPanelMinWidth = 560;
   const infoPanelMaxWidth = 1040;
   const infoPanelInset = 20;
   const taskListWidth = 360;
+  const headerHeight = 112;
 
   const [panelBounds, setPanelBounds] = useState<{ left: number; right: number; top: number; bottom: number } | null>(
     null
@@ -559,16 +554,16 @@ export const GanttChart: React.FC<Props> = ({
       }}
       ref={rootRef}
     >
-      <div className="taskList">
-        <div ref={leftHeaderRef} className="ganttHeader" style={{ padding: 12 }}>
-          <div className="label">Search</div>
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter tasks…" />
-          <div style={{ height: 10 }} />
-          <div className="label">Phase</div>
-          <select value={phaseFilter} onChange={(e) => setPhaseFilter(e.target.value)}>
-            <option value="">All phases</option>
-            {phases.map(p => <option key={p} value={p}>{p}</option>)}
-          </select>
+      <div className="taskList" onClick={clearSelection}>
+        <div className="ganttHeader" style={{ padding: 12, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div>
+            <div className="label">Phase</div>
+            <select value={phaseFilter} onChange={(e) => setPhaseFilter(e.target.value)}>
+              <option value="">All phases</option>
+              {phases.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1 }} />
         </div>
 
         <div>
@@ -602,7 +597,10 @@ export const GanttChart: React.FC<Props> = ({
                     background: t.id === selectedId ? "var(--selected-row-bg)" : "transparent",
                   }}
                   title={t.details || t.name}
-                  onClick={() => selectTask(t.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    selectTask(t.id);
+                  }}
                 >
                   <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "var(--muted-2)" }}>
                     {t.display_id || t.display_task_id || "—"}
@@ -615,8 +613,22 @@ export const GanttChart: React.FC<Props> = ({
         </div>
       </div>
 
-      <div style={{ overflow: "auto", position: "relative" }}>
-        <div ref={rightHeaderRef} className="ganttHeader" style={{ padding: 12, minWidth: svgWidth }}>
+      <div
+        style={{ overflow: "auto", position: "relative" }}
+        onClick={() => {
+          // Clicking the empty chart area clears selection.
+          clearSelection();
+        }}
+      >
+        <div className="ganttHeader" style={{ padding: 12, minWidth: svgWidth, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div>
+            {/* Keep vertical alignment with Phase label, but don't show "Search" text */}
+            <div className="label" style={{ visibility: "hidden" }}>
+              Search
+            </div>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter tasks…" />
+          </div>
+          <div style={{ flex: 1 }} />
           <svg width={svgWidth} height={28}>
             {phaseLayout === "linear"
               ? ticks.map(d => (
@@ -821,7 +833,7 @@ export const GanttChart: React.FC<Props> = ({
           </div>
         ) : null}
 
-        <svg width={svgWidth} height={height + chartYOffset} style={{ display: "block" }}>
+        <svg width={svgWidth} height={height} style={{ display: "block" }}>
           {phaseLayout === "linear" ? (
             <>
               {/* Day background bands */}
@@ -831,7 +843,7 @@ export const GanttChart: React.FC<Props> = ({
                   x={chartPadLeft + b.d * pxPerDay}
                   y={0}
                   width={pxPerDay}
-                  height={height + chartYOffset}
+                  height={height}
                   fill={b.fill}
                 />
               ))}
@@ -844,7 +856,7 @@ export const GanttChart: React.FC<Props> = ({
                       x1={chartPadLeft + d * pxPerDay}
                       y1={0}
                       x2={chartPadLeft + d * pxPerDay}
-                      y2={height + chartYOffset}
+                      y2={height}
                           stroke="var(--gantt-grid)"
                     />
                   ))
@@ -854,7 +866,7 @@ export const GanttChart: React.FC<Props> = ({
                       x1={chartPadLeft + d * pxPerDay}
                       y1={0}
                       x2={chartPadLeft + d * pxPerDay}
-                      y2={height + chartYOffset}
+                      y2={height}
                           stroke="var(--gantt-grid)"
                     />
                   ))}
@@ -864,7 +876,7 @@ export const GanttChart: React.FC<Props> = ({
               {/* Stacked mode: per-phase banding, grid, and per-phase axes */}
               {phaseSections.map((sec) => {
                 const phaseBase = baseUtcByPhase.get(sec.phase) ?? baseUtc;
-                const y0 = sec.startRowIdx * rowHeight + chartYOffset;
+                const y0 = sec.startRowIdx * rowHeight;
                 const secH = (sec.endRowIdx - sec.startRowIdx + 1) * rowHeight;
 
                 // Build alternating weekday colors, resetting per phase.
@@ -914,7 +926,7 @@ export const GanttChart: React.FC<Props> = ({
                       <text
                         key={`tick-${sec.phase}-${d}`}
                         x={chartPadLeft + d * pxPerDay + 2}
-                        y={sec.headerRowIdx * rowHeight + 18 + chartYOffset}
+                        y={sec.headerRowIdx * rowHeight + 18}
                         fontSize={11}
                         fill="var(--gantt-axis)"
                       >
@@ -935,12 +947,19 @@ export const GanttChart: React.FC<Props> = ({
             const span = drawSpanById.get(t.id);
             const segs = segmentsById.get(t.id) || [];
             const rowIdx = rowIndexById.get(t.id) ?? t.schedule.row;
-            const y = rowIdx * rowHeight + 5 + chartYOffset;
+            const y = rowIdx * rowHeight + 5;
             const h = rowHeight - 10;
             const labelRendered = false;
             const isSelected = t.id === selectedId;
             return (
-              <g key={t.id} onClick={() => selectTask(t.id)} style={{ cursor: "pointer" }}>
+              <g
+                key={t.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  selectTask(t.id);
+                }}
+                style={{ cursor: "pointer" }}
+              >
                 {segs.length === 0 ? (
                   (() => {
                     const xDay = span?.xDay ?? (t.schedule.x ?? 0);
