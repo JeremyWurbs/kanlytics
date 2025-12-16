@@ -18,14 +18,24 @@ export type TaskItem = {
   display_id?: string;
   display_task_id?: string | null;
   task_id?: string | null;
+  url?: string | null;
+  number?: number | null;
+  state?: string | null;
+  labels?: string[];
+  assignees?: string[];
   phase: string;
   name: string;
+  title?: string;
   details?: string;
+  body?: string;
   milestone_or_output?: string;
+  acceptance_criteria?: string;
   dependencies: string[];
   roles?: Record<string, unknown>;
   notes?: string;
   durations?: { wall: number; billable: number };
+  start_date?: string | null;
+  end_date?: string | null;
   schedule: TaskLayout;
 };
 

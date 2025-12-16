@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Edge, GanttLayout, TaskItem } from "../types";
 
 type Props = {
@@ -153,6 +153,7 @@ export const GanttChart: React.FC<Props> = ({
 }) => {
   const [search, setSearch] = useState("");
   const [phaseFilter, setPhaseFilter] = useState<string>("");
+  const [selectedId, setSelectedId] = useState<string>("");
 
   const tasks = layout.tasks;
   const leftHeaderRef = useRef<HTMLDivElement | null>(null);
@@ -175,6 +176,29 @@ export const GanttChart: React.FC<Props> = ({
       return hay.includes(q);
     });
   }, [tasks, search, phaseFilter]);
+
+  // Pick a sensible default selection.
+  useEffect(() => {
+    if (!tasks.length) {
+      setSelectedId("");
+      return;
+    }
+    if (selectedId && tasks.some(t => t.id === selectedId)) return;
+    setSelectedId(tasks[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks.length]);
+
+  const taskById = useMemo(() => new Map(tasks.map(t => [t.id, t])), [tasks]);
+  const selected = useMemo(() => (selectedId ? taskById.get(selectedId) : undefined), [selectedId, taskById]);
+
+  const displayById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const t of tasks) {
+      const k = t.display_id || t.display_task_id || "";
+      if (k) m.set(t.id, k);
+    }
+    return m;
+  }, [tasks]);
 
   // Base project start (UTC midnight).
   const baseUtc = useMemo(() => parseIsoDateUtc(layout.meta.project_start) ?? Date.now(), [layout.meta.project_start]);
@@ -480,7 +504,7 @@ export const GanttChart: React.FC<Props> = ({
   }, [baseUtc, dayCount]);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", minWidth: 0 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr 360px", minWidth: 0 }}>
       <div className="taskList">
         <div ref={leftHeaderRef} className="ganttHeader" style={{ padding: 12 }}>
           <div className="label">Search</div>
@@ -520,8 +544,11 @@ export const GanttChart: React.FC<Props> = ({
                     alignItems: "center",
                     gap: 10,
                     overflow: "hidden",
+                    cursor: "pointer",
+                    background: t.id === selectedId ? "#eef2ff" : "transparent",
                   }}
                   title={t.details || t.name}
+                  onClick={() => setSelectedId(t.id)}
                 >
                   <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "#475569" }}>
                     {t.display_id || t.display_task_id || "—"}
@@ -667,8 +694,9 @@ export const GanttChart: React.FC<Props> = ({
             const y = rowIdx * rowHeight + 5 + chartYOffset;
             const h = rowHeight - 10;
             const labelRendered = false;
+            const isSelected = t.id === selectedId;
             return (
-              <g key={t.id}>
+              <g key={t.id} onClick={() => setSelectedId(t.id)} style={{ cursor: "pointer" }}>
                 {segs.length === 0 ? (
                   (() => {
                     const xDay = span?.xDay ?? (t.schedule.x ?? 0);
@@ -678,7 +706,7 @@ export const GanttChart: React.FC<Props> = ({
                     const d = barPath(x, y, w, h, true, true);
                     return (
                       <>
-                        <path d={d} fill="none" stroke="#0f172a" strokeWidth={2} opacity={0.9} />
+                        <path d={d} fill="none" stroke={isSelected ? "#2563eb" : "#0f172a"} strokeWidth={2} opacity={0.9} />
                         <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="#0f172a" style={{ pointerEvents: "none" }}>
                           {t.display_id || t.display_task_id || ""}
                         </text>
@@ -691,7 +719,16 @@ export const GanttChart: React.FC<Props> = ({
                       const x = chartPadLeft + seg.xDay * pxPerDay;
                       const w = Math.max(6, seg.wDay * pxPerDay);
                       const d = barPath(x, y, w, h, seg.roundLeft, seg.roundRight);
-                      return <path key={`${t.id}-seg-${idx}`} d={d} fill="none" stroke="#0f172a" strokeWidth={2} opacity={0.9} />;
+                      return (
+                        <path
+                          key={`${t.id}-seg-${idx}`}
+                          d={d}
+                          fill="none"
+                          stroke={isSelected ? "#2563eb" : "#0f172a"}
+                          strokeWidth={2}
+                          opacity={0.9}
+                        />
+                      );
                     })}
                     {/* Label once, on the first segment */}
                     <text
@@ -709,6 +746,144 @@ export const GanttChart: React.FC<Props> = ({
             );
           })}
         </svg>
+      </div>
+
+      {/* Right-side info panel */}
+      <div style={{ borderLeft: "1px solid #e2e8f0", minWidth: 0 }}>
+        <div className="ganttHeader" style={{ padding: 12 }}>
+          <div style={{ fontWeight: 700 }}>Task details</div>
+          <div className="small" style={{ marginTop: 4 }}>
+            Click a task to inspect its fields.
+          </div>
+        </div>
+        <div style={{ padding: 12, overflow: "auto", maxHeight: "calc(100vh - 240px)" }}>
+          {!selected ? (
+            <div className="small">No task selected.</div>
+          ) : (
+            <>
+              <div style={{ display: "grid", gap: 10 }}>
+                <div>
+                  <div className="label">Display Task ID</div>
+                  <div className="mono">{selected.display_id || selected.display_task_id || "—"}</div>
+                </div>
+
+                <div>
+                  <div className="label">Title</div>
+                  <div style={{ fontWeight: 600 }}>{selected.title || selected.name || "—"}</div>
+                </div>
+
+                {selected.phase ? (
+                  <div>
+                    <div className="label">Phase</div>
+                    <div>{selected.phase}</div>
+                  </div>
+                ) : null}
+
+                {selected.milestone_or_output ? (
+                  <div>
+                    <div className="label">Milestone / Output</div>
+                    <div>{selected.milestone_or_output}</div>
+                  </div>
+                ) : null}
+
+                {selected.acceptance_criteria ? (
+                  <div>
+                    <div className="label">Acceptance criteria</div>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.acceptance_criteria}</pre>
+                  </div>
+                ) : null}
+
+                {selected.details || selected.body ? (
+                  <div>
+                    <div className="label">Details</div>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>
+                      {selected.details || selected.body}
+                    </pre>
+                  </div>
+                ) : null}
+
+                <div>
+                  <div className="label">Schedule</div>
+                  <div className="small">
+                    {selected.schedule.start} → {selected.schedule.end}
+                  </div>
+                </div>
+
+                {selected.start_date || selected.end_date ? (
+                  <div>
+                    <div className="label">Planned window</div>
+                    <div className="small">
+                      {(selected.start_date ?? "—")} → {(selected.end_date ?? "—")}
+                    </div>
+                  </div>
+                ) : null}
+
+                {selected.durations ? (
+                  <div>
+                    <div className="label">Durations</div>
+                    <div className="small">
+                      wall: {selected.durations.wall} / billable: {selected.durations.billable}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div>
+                  <div className="label">Dependencies</div>
+                  <div className="small">
+                    {(selected.dependencies || []).length === 0
+                      ? "None"
+                      : selected.dependencies
+                          .map((dep) => displayById.get(dep) || dep)
+                          .join(", ")}
+                  </div>
+                </div>
+
+                {selected.labels && selected.labels.length ? (
+                  <div>
+                    <div className="label">Labels</div>
+                    <div className="small">{selected.labels.join(", ")}</div>
+                  </div>
+                ) : null}
+
+                {selected.assignees && selected.assignees.length ? (
+                  <div>
+                    <div className="label">Assignees</div>
+                    <div className="small">{selected.assignees.join(", ")}</div>
+                  </div>
+                ) : null}
+
+                {selected.url ? (
+                  <div>
+                    <div className="label">GitHub URL</div>
+                    <div className="small" style={{ wordBreak: "break-all" }}>{selected.url}</div>
+                  </div>
+                ) : null}
+
+                {selected.state ? (
+                  <div>
+                    <div className="label">State</div>
+                    <div className="small">{selected.state}</div>
+                  </div>
+                ) : null}
+
+                {selected.notes ? (
+                  <div>
+                    <div className="label">Notes</div>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.notes}</pre>
+                  </div>
+                ) : null}
+
+                <details>
+                  <summary className="small" style={{ cursor: "pointer" }}>Raw identifiers</summary>
+                  <div className="small" style={{ marginTop: 8 }}>
+                    <div><span className="mono">Task ID</span>: <span className="mono">{selected.task_id || "—"}</span></div>
+                    <div><span className="mono">Internal id</span>: <span className="mono">{selected.id}</span></div>
+                  </div>
+                </details>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
