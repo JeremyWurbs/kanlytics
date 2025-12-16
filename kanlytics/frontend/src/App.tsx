@@ -15,6 +15,14 @@ export default function App() {
   const lastScheduleKeyRef = useRef<string>("");
   const toastTimerRef = useRef<number | null>(null);
 
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("kanlytics.theme") === "dark";
+    } catch {
+      return false;
+    }
+  });
+
   const [kanlyticsOpen, setKanlyticsOpen] = useState<boolean>(true);
   const [sourceOpen, setSourceOpen] = useState<boolean>(true);
   const [ganttSettingsOpen, setGanttSettingsOpen] = useState<boolean>(true);
@@ -38,6 +46,16 @@ export default function App() {
   const [err, setErr] = useState<string>("");
 
   const hasCsv = useMemo(() => csvText.trim().length > 0, [csvText]);
+
+  useEffect(() => {
+    const el = document.documentElement;
+    el.dataset.theme = darkMode ? "dark" : "light";
+    try {
+      window.localStorage.setItem("kanlytics.theme", darkMode ? "dark" : "light");
+    } catch {
+      // ignore
+    }
+  }, [darkMode]);
 
   function showToast(kind: "success" | "error", text: string) {
     if (toastTimerRef.current) {
@@ -181,7 +199,7 @@ export default function App() {
                 cursor: "pointer",
                 fontSize: 20,
                 fontWeight: 700,
-                color: "#0f172a",
+                color: "var(--text)",
               }}
               title={kanlyticsOpen ? "Collapse panels" : "Expand panels"}
             >
@@ -203,7 +221,7 @@ export default function App() {
             {/* Project Source panel */}
             <div
               style={{
-                border: "1px solid #e2e8f0",
+                border: "1px solid var(--border)",
                 borderRadius: 14,
                 padding: 12,
               }}
@@ -221,7 +239,7 @@ export default function App() {
                   background: "transparent",
                   cursor: "pointer",
                   fontWeight: 700,
-                  color: "#0f172a",
+                  color: "var(--text)",
                   marginBottom: sourceOpen ? 10 : 0,
                 }}
                 title={sourceOpen ? "Collapse Source" : "Expand Source"}
@@ -248,7 +266,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      style={{ background: "white", color: "#0f172a", border: "1px solid #cbd5e1" }}
+                      style={{ background: "var(--card)", color: "var(--text)", border: "1px solid var(--border-2)" }}
                     >
                       Load CSV
                     </button>
@@ -256,7 +274,7 @@ export default function App() {
                       type="button"
                       onClick={saveCsv}
                       disabled={!hasCsv}
-                      style={{ background: "white", color: "#0f172a", border: "1px solid #cbd5e1" }}
+                      style={{ background: "var(--card)", color: "var(--text)", border: "1px solid var(--border-2)" }}
                     >
                       Save CSV
                     </button>
@@ -269,7 +287,7 @@ export default function App() {
             <div
               style={{
                 marginTop: 12,
-                border: "1px solid #e2e8f0",
+                border: "1px solid var(--border)",
                 borderRadius: 14,
                 padding: 12,
               }}
@@ -287,7 +305,7 @@ export default function App() {
                   background: "transparent",
                   cursor: "pointer",
                   fontWeight: 700,
-                  color: "#0f172a",
+                  color: "var(--text)",
                   marginBottom: ganttSettingsOpen ? 10 : 0,
                 }}
                 title={ganttSettingsOpen ? "Collapse Gantt Settings" : "Expand Gantt Settings"}
@@ -312,7 +330,7 @@ export default function App() {
             <div
               style={{
                 marginTop: 12,
-                border: "1px solid #e2e8f0",
+                border: "1px solid var(--border)",
                 borderRadius: 14,
                 padding: 12,
               }}
@@ -330,7 +348,7 @@ export default function App() {
                   background: "transparent",
                   cursor: "pointer",
                   fontWeight: 700,
-                  color: "#0f172a",
+                  color: "var(--text)",
                   marginBottom: viewOptionsOpen ? 10 : 0,
                 }}
                 title={viewOptionsOpen ? "Collapse View Options" : "Expand View Options"}
@@ -406,6 +424,14 @@ export default function App() {
                     <select value={showDailyGrid ? "yes" : "no"} onChange={(e) => setShowDailyGrid(e.target.value === "yes")}>
                       <option value="no">Off</option>
                       <option value="yes">On</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="label">Dark mode</div>
+                    <select value={darkMode ? "on" : "off"} onChange={(e) => setDarkMode(e.target.value === "on")}>
+                      <option value="off">Off</option>
+                      <option value="on">On</option>
                     </select>
                   </div>
                 </div>

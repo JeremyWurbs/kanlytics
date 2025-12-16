@@ -495,9 +495,9 @@ export const GanttChart: React.FC<Props> = ({
       const dow = new Date(t).getUTCDay(); // 0=Sun..6=Sat
       const isWeekend = dow === 0 || dow === 6;
       if (isWeekend) {
-        out.push({ d, fill: "#e6f3ff" });
+        out.push({ d, fill: "var(--gantt-weekend)" });
       } else {
-        const fill = workdayIdx % 2 === 0 ? "#ffffff" : "#f8fafc";
+        const fill = workdayIdx % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)";
         out.push({ d, fill });
         workdayIdx += 1;
       }
@@ -578,8 +578,8 @@ export const GanttChart: React.FC<Props> = ({
                 style={{
                   height: rowHeight,
                   padding: "0 12px",
-                  borderBottom: "1px solid #e2e8f0",
-                  background: "#f8fafc",
+                  borderBottom: "1px solid var(--border)",
+                  background: "var(--gantt-phase-header)",
                   fontWeight: 600,
                   display: "flex",
                   alignItems: "center",
@@ -592,19 +592,19 @@ export const GanttChart: React.FC<Props> = ({
                   key={t.id}
                   style={{
                     padding: "8px 12px",
-                    borderBottom: "1px solid #f1f5f9",
+                    borderBottom: "1px solid var(--border)",
                     height: rowHeight,
                     display: "flex",
                     alignItems: "center",
                     gap: 10,
                     overflow: "hidden",
                     cursor: "pointer",
-                    background: t.id === selectedId ? "#eef2ff" : "transparent",
+                    background: t.id === selectedId ? "var(--selected-row-bg)" : "transparent",
                   }}
                   title={t.details || t.name}
                   onClick={() => selectTask(t.id)}
                 >
-                  <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "#475569" }}>
+                  <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "var(--muted-2)" }}>
                     {t.display_id || t.display_task_id || "—"}
                   </span>
                   <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
@@ -621,8 +621,8 @@ export const GanttChart: React.FC<Props> = ({
             {phaseLayout === "linear"
               ? ticks.map(d => (
                   <g key={d}>
-                    <line x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={28} stroke="#e2e8f0" />
-                    <text x={chartPadLeft + d * pxPerDay + 2} y={18} fontSize={11} fill="#475569">
+                    <line x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={28} stroke="var(--gantt-grid)" />
+                    <text x={chartPadLeft + d * pxPerDay + 2} y={18} fontSize={11} fill="var(--gantt-axis)">
                       {formatTick(d)}
                     </text>
                   </g>
@@ -655,15 +655,15 @@ export const GanttChart: React.FC<Props> = ({
                 maxWidth: infoPanelMaxWidth,
                 minWidth: infoPanelMinWidth,
                 height: "100%",
-                background: "rgba(255, 255, 255, 0.98)",
-                border: "1px solid #e2e8f0",
+                background: "var(--overlay-bg)",
+                border: "1px solid var(--border)",
                 borderRadius: 14,
-                boxShadow: "0 18px 50px rgba(15, 23, 42, 0.18)",
+                boxShadow: "var(--overlay-shadow)",
                 overflow: "hidden",
                 backdropFilter: "blur(2px)",
               }}
             >
-                <div style={{ padding: 12, borderBottom: "1px solid #e2e8f0", background: "white" }}>
+                <div style={{ padding: 12, borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
                   <div style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: 12 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>Task details</div>
@@ -679,9 +679,9 @@ export const GanttChart: React.FC<Props> = ({
                       style={{
                         padding: "6px 10px",
                         borderRadius: 10,
-                        border: "1px solid #cbd5e1",
-                        background: "white",
-                        color: "#0f172a",
+                        border: "1px solid var(--border-2)",
+                        background: "var(--card)",
+                        color: "var(--text)",
                         lineHeight: 1,
                       }}
                     >
@@ -845,7 +845,7 @@ export const GanttChart: React.FC<Props> = ({
                       y1={0}
                       x2={chartPadLeft + d * pxPerDay}
                       y2={height + chartYOffset}
-                      stroke="#e2e8f0"
+                          stroke="var(--gantt-grid)"
                     />
                   ))
                 : ticks.map(d => (
@@ -855,7 +855,7 @@ export const GanttChart: React.FC<Props> = ({
                       y1={0}
                       x2={chartPadLeft + d * pxPerDay}
                       y2={height + chartYOffset}
-                      stroke="#e2e8f0"
+                          stroke="var(--gantt-grid)"
                     />
                   ))}
             </>
@@ -874,9 +874,9 @@ export const GanttChart: React.FC<Props> = ({
                   const t = phaseBase + d * 24 * 60 * 60 * 1000;
                   const dow = new Date(t).getUTCDay();
                   const isWeekend = dow === 0 || dow === 6;
-                  if (isWeekend) fills.push("#e6f3ff");
+                  if (isWeekend) fills.push("var(--gantt-weekend)");
                   else {
-                    fills.push(workdayIdx % 2 === 0 ? "#ffffff" : "#f8fafc");
+                    fills.push(workdayIdx % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
                     workdayIdx += 1;
                   }
                 }
@@ -905,7 +905,7 @@ export const GanttChart: React.FC<Props> = ({
                         y1={y0}
                         x2={chartPadLeft + d * pxPerDay}
                         y2={y0 + secH}
-                        stroke="#e2e8f0"
+                        stroke="var(--gantt-grid)"
                       />
                     ))}
 
@@ -916,7 +916,7 @@ export const GanttChart: React.FC<Props> = ({
                         x={chartPadLeft + d * pxPerDay + 2}
                         y={sec.headerRowIdx * rowHeight + 18 + chartYOffset}
                         fontSize={11}
-                        fill="#475569"
+                        fill="var(--gantt-axis)"
                       >
                         {formatTickForBase(phaseBase, d)}
                       </text>
@@ -928,7 +928,7 @@ export const GanttChart: React.FC<Props> = ({
           )}
 
           {showDeps && depPaths.map(p => (
-            <path key={p.key} d={p.d} fill="none" stroke="#94a3b8" strokeWidth={1} />
+            <path key={p.key} d={p.d} fill="none" stroke="var(--gantt-dep)" strokeWidth={1} />
           ))}
 
           {filtered.map(t => {
@@ -950,8 +950,8 @@ export const GanttChart: React.FC<Props> = ({
                     const d = barPath(x, y, w, h, true, true);
                     return (
                       <>
-                        <path d={d} fill="none" stroke={isSelected ? "#2563eb" : "#0f172a"} strokeWidth={2} opacity={0.9} />
-                        <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="#0f172a" style={{ pointerEvents: "none" }}>
+                        <path d={d} fill="none" stroke={isSelected ? "var(--gantt-selected)" : "var(--text)"} strokeWidth={2} opacity={0.9} />
+                        <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="var(--text)" style={{ pointerEvents: "none" }}>
                           {t.display_id || t.display_task_id || ""}
                         </text>
                       </>
@@ -968,7 +968,7 @@ export const GanttChart: React.FC<Props> = ({
                           key={`${t.id}-seg-${idx}`}
                           d={d}
                           fill="none"
-                          stroke={isSelected ? "#2563eb" : "#0f172a"}
+                          stroke={isSelected ? "var(--gantt-selected)" : "var(--text)"}
                           strokeWidth={2}
                           opacity={0.9}
                         />
@@ -979,7 +979,7 @@ export const GanttChart: React.FC<Props> = ({
                       x={chartPadLeft + segs[0].xDay * pxPerDay + 8}
                       y={y + h / 2 + 4}
                       fontSize={11}
-                      fill="#0f172a"
+                      fill="var(--text)"
                       style={{ pointerEvents: "none" }}
                     >
                       {t.display_id || t.display_task_id || ""}
