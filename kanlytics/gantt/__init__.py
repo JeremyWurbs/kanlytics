@@ -1,4 +1,5 @@
 """Gantt chart module for project planning and scheduling."""
-from .gantt import Gantt, Task, ScheduledTask, DateLike
+from kanlytics.core.github_issue import GitHubIssue
+from .gantt import Gantt, ScheduledTask, DateLike
 
-__all__ = ["Gantt", "Task", "ScheduledTask", "DateLike"]
+__all__ = ["Gantt", "GitHubIssue", "ScheduledTask", "DateLike"]

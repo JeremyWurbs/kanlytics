@@ -1,35 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import csv
 import math
 import re
+import uuid
+
+from kanlytics.core.github_issue import GitHubIssue
 
 
 DateLike = Union[date, datetime, str]
 
 
-@dataclass(frozen=True)
-class Task:
-    """
-    A single task in the Gantt plan.
-    """
-    id: str
-    phase: str
-    name: str
-    details: str = ""
-    milestone_or_output: str = ""
-    dependencies: Tuple[str, ...] = field(default_factory=tuple)
-
-    # Durations (as provided)
-    wall_days: float = 0.0
-    billable_days: float = 0.0
-
-    # Optional extra fields (roles / notes / etc.)
-    roles: Dict[str, Any] = field(default_factory=dict)
-    notes: str = ""
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -37,7 +21,7 @@ class ScheduledTask:
     """
     A task with computed schedule and layout properties.
     """
-    task: Task
+    task: GitHubIssue
     start: date
     end: date  # inclusive end date
     start_offset_days: int
@@ -67,9 +51,9 @@ class Gantt:
         # data is JSON-serializable and ready for a frontend.
     """
 
-    def __init__(self, tasks: List[Task]) -> None:
-        self._tasks: List[Task] = tasks
-        self._task_by_id: Dict[str, Task] = {t.id: t for t in tasks}
+    def __init__(self, tasks: List[GitHubIssue]) -> None:
+        self._tasks: List[GitHubIssue] = tasks
+        self._task_by_id: Dict[str, GitHubIssue] = {t.id: t for t in tasks}
 
         self._scheduled: Dict[str, ScheduledTask] = {}
         self._last_schedule_meta: Dict[str, Any] = {}
@@ -84,90 +68,112 @@ class Gantt:
     @classmethod
     def from_csv(cls, path: str) -> "Gantt":
         """
-        Load and normalize tasks from the Mindtrace/Adient-style CSV.
+        Load tasks from the V2 template CSV format (single header row).
 
-        Handles:
-        - "metadata row" (row 0) that labels columns like Billable/Wall and role headers
-        - forward-filling Phase
-        - Task ID normalization as string
-        - Dependencies parsing (comma-separated)
-        - Role columns (PM, Sales, etc.) captured into Task.roles
+        Template workflow (Option A):
+        - `Template Task ID` is a stable, human-friendly identifier used only in templates.
+        - `Task ID` is a UUID that is generated the first time a template is instantiated.
+        - `Template Dependencies` references template IDs; on first load, we remap them
+          into UUID `Dependencies` using the generated `Task ID`s.
 
         Example::
-            g = Gantt.from_csv("/path/to/AI_Deployment_Master_Task_Checklist.csv")
+            g = Gantt.from_csv("/path/to/template.csv")
         """
-        rows = cls._read_csv_rows(path)
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
         if not rows:
             return cls([])
 
-        # Detect and drop metadata header row if it looks like your file:
-        # It contains "Billable" in Expected Time (Days) and "Wall" in an unnamed column.
-        header = rows[0]
-        data_rows = rows[1:]
+        def get(r: Dict[str, Any], key: str) -> str:
+            return (r.get(key) or "").strip()
 
-        # If there's an obvious metadata row, use it to rename columns
-        # e.g. header["Expected Time (Days)"] == "Billable"
-        # and header["Unnamed: 7"] == "Wall"
-        renamed_header = dict(header)  # metadata row values
-        colnames = list(renamed_header.keys())
+        # Pass 1: determine/generate UUID Task IDs and build template-id mapping
+        template_to_task: Dict[str, str] = {}
+        items: List[Dict[str, Any]] = []
 
-        # Rebuild a "true header" map: original columns -> normalized column names
-        # We'll treat the first real data row as having those original columns.
-        # Normalize known fields.
-        norm_map = cls._build_normalization_map(renamed_header)
-
-        tasks: List[Task] = []
-        current_phase = ""
-
-        for r in data_rows:
-            # Skip completely empty rows
+        for r in rows:
+            # Skip empty lines
             if all((v or "").strip() == "" for v in r.values()):
                 continue
 
-            phase = (r.get("Phase") or "").strip()
-            if phase:
-                current_phase = phase
-            phase = current_phase
+            template_id = get(r, "Template Task ID")
+            task_id = get(r, "Task ID")
 
-            raw_id = (r.get("Task ID") or "").strip()
-            if not raw_id:
-                # If no ID, skip (or could auto-generate)
-                continue
-            task_id = cls._normalize_task_id(raw_id)
+            if template_id == "" and task_id == "":
+                raise ValueError("Each row must have at least 'Template Task ID' or 'Task ID'")
 
-            name = (r.get("Task") or "").strip()
-            details = (r.get("Details") or "").strip()
-            milestone = (r.get("Milestone / Output") or "").strip()
+            # If Task ID is missing, GitHubIssue will auto-generate it, but we need the
+            # mapping now to remap template dependencies deterministically.
+            if task_id == "":
+                task_id = str(uuid.uuid4())
 
-            # durations
-            billable = cls._to_float(r.get(norm_map["billable_days_src"], "0"))
-            wall = cls._to_float(r.get(norm_map["wall_days_src"], "0"))
+            if template_id:
+                if template_id in template_to_task and template_to_task[template_id] != task_id:
+                    raise ValueError(f"Duplicate Template Task ID with conflicting Task IDs: {template_id}")
+                template_to_task[template_id] = task_id
 
-            # dependencies
-            deps_raw = (r.get("Dependencies") or "").strip()
-            deps = tuple(cls._parse_dependencies(deps_raw))
+            items.append({"row": r, "template_id": template_id, "task_id": task_id})
 
-            # roles: collect anything in role columns (if present)
+        # Pass 2: remap dependencies and build GitHubIssue objects
+        tasks: List[GitHubIssue] = []
+        for it in items:
+            r = it["row"]
+            template_id = it["template_id"]
+            task_id = it["task_id"]
+
+            deps_uuid: List[str] = []
+            deps_raw = get(r, "Dependencies")
+            tmpl_deps_raw = get(r, "Template Dependencies")
+
+            if deps_raw:
+                deps_uuid = cls._parse_dependencies(deps_raw)
+            elif tmpl_deps_raw:
+                for dep in cls._parse_dependencies(tmpl_deps_raw):
+                    if dep not in template_to_task:
+                        raise ValueError(f"Missing Template Task ID referenced in Template Dependencies: {dep}")
+                    deps_uuid.append(template_to_task[dep])
+
+            # Minimal role support in V2: either provide JSON-ish `roles` later, or keep columns.
             roles: Dict[str, Any] = {}
-            for src_col, role_key in norm_map.get("role_cols", {}).items():
-                val = (r.get(src_col) or "").strip()
-                if val != "":
-                    roles[role_key] = val
-
-            notes = (r.get(norm_map.get("notes_src", ""), "") or "").strip()
+            for role_key in (
+                "role_pm",
+                "role_sales",
+                "role_tech_lead",
+                "role_onsite_engr",
+                "role_cad",
+                "role_engr",
+                "role_integrator",
+                "role_client",
+            ):
+                v = get(r, role_key)
+                if v:
+                    roles[role_key.replace("role_", "")] = v
 
             tasks.append(
-                Task(
-                    id=task_id,
-                    phase=phase,
-                    name=name,
-                    details=details,
-                    milestone_or_output=milestone,
-                    dependencies=deps,
-                    wall_days=wall,
-                    billable_days=billable,
-                    roles=roles,
-                    notes=notes,
+                GitHubIssue(
+                    **{
+                        "Template Task ID": template_id,
+                        "Task ID": task_id,
+                        "phase": get(r, "phase"),
+                        "title": get(r, "title"),
+                        "body": get(r, "body"),
+                        "milestone_or_output": get(r, "milestone_or_output"),
+                        "acceptance_criteria": get(r, "acceptance_criteria"),
+                        "Dependencies": ",".join(deps_uuid),
+                        "start_date": get(r, "start_date") or None,
+                        "end_date": get(r, "end_date") or None,
+                        "wall_days": cls._to_float(get(r, "wall_days")),
+                        "billable_days": cls._to_float(get(r, "billable_days")),
+                        "Labels": get(r, "Labels"),
+                        "Assignees": get(r, "Assignees"),
+                        "notes": get(r, "notes"),
+                        "url": get(r, "url") or None,
+                        "number": (int(get(r, "number")) if get(r, "number").isdigit() else None),
+                        "state": get(r, "state") or None,
+                        "roles": roles,
+                    }
                 )
             )
 
@@ -311,7 +317,7 @@ class Gantt:
     # -----------------------------
 
     @property
-    def tasks(self) -> List[Task]:
+    def tasks(self) -> List[GitHubIssue]:
         return list(self._tasks)
 
     def schedule(
@@ -420,7 +426,7 @@ class Gantt:
                 {
                     "id": t.id,
                     "phase": t.phase,
-                    "name": t.name,
+                    "name": t.name or t.title,
                     "details": t.details,
                     "milestone_or_output": t.milestone_or_output,
                     "dependencies": list(t.dependencies),
