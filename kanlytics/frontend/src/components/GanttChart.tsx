@@ -151,9 +151,11 @@ export const GanttChart: React.FC<Props> = ({
   timeAxisMode = "dayCount",
   phaseLayout = "stacked",
 }) => {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [search, setSearch] = useState("");
   const [phaseFilter, setPhaseFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string>("");
+  const [infoOpen, setInfoOpen] = useState<boolean>(true);
 
   const tasks = layout.tasks;
   const leftHeaderRef = useRef<HTMLDivElement | null>(null);
@@ -503,8 +505,60 @@ export const GanttChart: React.FC<Props> = ({
     return out;
   }, [baseUtc, dayCount]);
 
+  function selectTask(id: string) {
+    setSelectedId(id);
+    setInfoOpen(true);
+  }
+
+  const infoPanelMinWidth = 560;
+  const infoPanelMaxWidth = 1040;
+  const infoPanelInset = 20;
+  const taskListWidth = 360;
+
+  const [panelBounds, setPanelBounds] = useState<{ left: number; right: number; top: number; bottom: number } | null>(
+    null
+  );
+
+  // Keep the info panel fixed in the viewport, but aligned/inset within the visible gantt shell.
+  useLayoutEffect(() => {
+    const compute = () => {
+      const root = rootRef.current;
+      const shell = root?.closest(".ganttShell") as HTMLElement | null;
+      if (!shell) {
+        setPanelBounds(null);
+        return;
+      }
+      const r = shell.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      const left = Math.max(16, r.left + taskListWidth + infoPanelInset);
+      const right = Math.max(16, vw - r.right + infoPanelInset);
+      const top = Math.max(16, r.top + infoPanelInset);
+      const bottom = Math.max(16, vh - r.bottom + infoPanelInset);
+
+      setPanelBounds({ left, right, top, bottom });
+    };
+
+    compute();
+    window.addEventListener("resize", compute);
+    window.addEventListener("scroll", compute, { passive: true });
+    return () => {
+      window.removeEventListener("resize", compute);
+      window.removeEventListener("scroll", compute as any);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr 360px", minWidth: 0 }}>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: `${taskListWidth}px 1fr`,
+        minWidth: 0,
+      }}
+      ref={rootRef}
+    >
       <div className="taskList">
         <div ref={leftHeaderRef} className="ganttHeader" style={{ padding: 12 }}>
           <div className="label">Search</div>
@@ -548,7 +602,7 @@ export const GanttChart: React.FC<Props> = ({
                     background: t.id === selectedId ? "#eef2ff" : "transparent",
                   }}
                   title={t.details || t.name}
-                  onClick={() => setSelectedId(t.id)}
+                  onClick={() => selectTask(t.id)}
                 >
                   <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "#475569" }}>
                     {t.display_id || t.display_task_id || "—"}
@@ -561,7 +615,7 @@ export const GanttChart: React.FC<Props> = ({
         </div>
       </div>
 
-      <div style={{ overflow: "auto" }}>
+      <div style={{ overflow: "auto", position: "relative" }}>
         <div ref={rightHeaderRef} className="ganttHeader" style={{ padding: 12, minWidth: svgWidth }}>
           <svg width={svgWidth} height={28}>
             {phaseLayout === "linear"
@@ -576,6 +630,196 @@ export const GanttChart: React.FC<Props> = ({
               : null}
           </svg>
         </div>
+
+        {/* Centered, inset overlay panel fixed to viewport (does not scroll away). */}
+        {infoOpen ? (
+          <div
+            style={{
+              position: "fixed",
+              left: panelBounds?.left ?? taskListWidth + 24,
+              right: panelBounds?.right ?? 24,
+              top: panelBounds?.top ?? 90,
+              bottom: panelBounds?.bottom ?? 24,
+              zIndex: 60,
+              pointerEvents: "none",
+              padding: infoPanelInset,
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "flex-start",
+            }}
+          >
+            <div
+              style={{
+                pointerEvents: "auto",
+                width: "100%",
+                maxWidth: infoPanelMaxWidth,
+                minWidth: infoPanelMinWidth,
+                height: "100%",
+                background: "rgba(255, 255, 255, 0.98)",
+                border: "1px solid #e2e8f0",
+                borderRadius: 14,
+                boxShadow: "0 18px 50px rgba(15, 23, 42, 0.18)",
+                overflow: "hidden",
+                backdropFilter: "blur(2px)",
+              }}
+            >
+                <div style={{ padding: 12, borderBottom: "1px solid #e2e8f0", background: "white" }}>
+                  <div style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: 12 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 700 }}>Task details</div>
+                      <div className="small" style={{ marginTop: 4 }}>
+                        Click tasks in the left list to browse; close to interact with the chart.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setInfoOpen(false)}
+                      title="Close details panel"
+                      aria-label="Close details panel"
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 10,
+                        border: "1px solid #cbd5e1",
+                        background: "white",
+                        color: "#0f172a",
+                        lineHeight: 1,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+                <div style={{ padding: 12, overflow: "auto", height: "calc(100% - 62px)" }}>
+                  {!selected ? (
+                    <div className="small">No task selected.</div>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div>
+                          <div className="label">Display Task ID</div>
+                          <div className="mono">{selected.display_id || selected.display_task_id || "—"}</div>
+                        </div>
+
+                        <div>
+                          <div className="label">Title</div>
+                          <div style={{ fontWeight: 600 }}>{selected.title || selected.name || "—"}</div>
+                        </div>
+
+                        {selected.phase ? (
+                          <div>
+                            <div className="label">Phase</div>
+                            <div>{selected.phase}</div>
+                          </div>
+                        ) : null}
+
+                        {selected.milestone_or_output ? (
+                          <div>
+                            <div className="label">Milestone / Output</div>
+                            <div>{selected.milestone_or_output}</div>
+                          </div>
+                        ) : null}
+
+                        {selected.acceptance_criteria ? (
+                          <div>
+                            <div className="label">Acceptance criteria</div>
+                            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.acceptance_criteria}</pre>
+                          </div>
+                        ) : null}
+
+                        {selected.details || selected.body ? (
+                          <div>
+                            <div className="label">Details</div>
+                            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>
+                              {selected.details || selected.body}
+                            </pre>
+                          </div>
+                        ) : null}
+
+                        <div>
+                          <div className="label">Schedule</div>
+                          <div className="small">
+                            {selected.schedule.start} → {selected.schedule.end}
+                          </div>
+                        </div>
+
+                        {selected.start_date || selected.end_date ? (
+                          <div>
+                            <div className="label">Planned window</div>
+                            <div className="small">
+                              {(selected.start_date ?? "—")} → {(selected.end_date ?? "—")}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {selected.durations ? (
+                          <div>
+                            <div className="label">Durations</div>
+                            <div className="small">
+                              wall: {selected.durations.wall} / billable: {selected.durations.billable}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div>
+                          <div className="label">Dependencies</div>
+                          <div className="small">
+                            {(selected.dependencies || []).length === 0
+                              ? "None"
+                              : selected.dependencies
+                                  .map((dep) => displayById.get(dep) || dep)
+                                  .join(", ")}
+                          </div>
+                        </div>
+
+                        {selected.labels && selected.labels.length ? (
+                          <div>
+                            <div className="label">Labels</div>
+                            <div className="small">{selected.labels.join(", ")}</div>
+                          </div>
+                        ) : null}
+
+                        {selected.assignees && selected.assignees.length ? (
+                          <div>
+                            <div className="label">Assignees</div>
+                            <div className="small">{selected.assignees.join(", ")}</div>
+                          </div>
+                        ) : null}
+
+                        {selected.url ? (
+                          <div>
+                            <div className="label">GitHub URL</div>
+                            <div className="small" style={{ wordBreak: "break-all" }}>{selected.url}</div>
+                          </div>
+                        ) : null}
+
+                        {selected.state ? (
+                          <div>
+                            <div className="label">State</div>
+                            <div className="small">{selected.state}</div>
+                          </div>
+                        ) : null}
+
+                        {selected.notes ? (
+                          <div>
+                            <div className="label">Notes</div>
+                            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.notes}</pre>
+                          </div>
+                        ) : null}
+
+                        <details>
+                          <summary className="small" style={{ cursor: "pointer" }}>Raw identifiers</summary>
+                          <div className="small" style={{ marginTop: 8 }}>
+                            <div><span className="mono">Task ID</span>: <span className="mono">{selected.task_id || "—"}</span></div>
+                            <div><span className="mono">Internal id</span>: <span className="mono">{selected.id}</span></div>
+                          </div>
+                        </details>
+                      </div>
+                    </>
+                  )}
+                </div>
+            </div>
+          </div>
+        ) : null}
 
         <svg width={svgWidth} height={height + chartYOffset} style={{ display: "block" }}>
           {phaseLayout === "linear" ? (
@@ -696,7 +940,7 @@ export const GanttChart: React.FC<Props> = ({
             const labelRendered = false;
             const isSelected = t.id === selectedId;
             return (
-              <g key={t.id} onClick={() => setSelectedId(t.id)} style={{ cursor: "pointer" }}>
+              <g key={t.id} onClick={() => selectTask(t.id)} style={{ cursor: "pointer" }}>
                 {segs.length === 0 ? (
                   (() => {
                     const xDay = span?.xDay ?? (t.schedule.x ?? 0);
@@ -746,144 +990,6 @@ export const GanttChart: React.FC<Props> = ({
             );
           })}
         </svg>
-      </div>
-
-      {/* Right-side info panel */}
-      <div style={{ borderLeft: "1px solid #e2e8f0", minWidth: 0 }}>
-        <div className="ganttHeader" style={{ padding: 12 }}>
-          <div style={{ fontWeight: 700 }}>Task details</div>
-          <div className="small" style={{ marginTop: 4 }}>
-            Click a task to inspect its fields.
-          </div>
-        </div>
-        <div style={{ padding: 12, overflow: "auto", maxHeight: "calc(100vh - 240px)" }}>
-          {!selected ? (
-            <div className="small">No task selected.</div>
-          ) : (
-            <>
-              <div style={{ display: "grid", gap: 10 }}>
-                <div>
-                  <div className="label">Display Task ID</div>
-                  <div className="mono">{selected.display_id || selected.display_task_id || "—"}</div>
-                </div>
-
-                <div>
-                  <div className="label">Title</div>
-                  <div style={{ fontWeight: 600 }}>{selected.title || selected.name || "—"}</div>
-                </div>
-
-                {selected.phase ? (
-                  <div>
-                    <div className="label">Phase</div>
-                    <div>{selected.phase}</div>
-                  </div>
-                ) : null}
-
-                {selected.milestone_or_output ? (
-                  <div>
-                    <div className="label">Milestone / Output</div>
-                    <div>{selected.milestone_or_output}</div>
-                  </div>
-                ) : null}
-
-                {selected.acceptance_criteria ? (
-                  <div>
-                    <div className="label">Acceptance criteria</div>
-                    <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.acceptance_criteria}</pre>
-                  </div>
-                ) : null}
-
-                {selected.details || selected.body ? (
-                  <div>
-                    <div className="label">Details</div>
-                    <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>
-                      {selected.details || selected.body}
-                    </pre>
-                  </div>
-                ) : null}
-
-                <div>
-                  <div className="label">Schedule</div>
-                  <div className="small">
-                    {selected.schedule.start} → {selected.schedule.end}
-                  </div>
-                </div>
-
-                {selected.start_date || selected.end_date ? (
-                  <div>
-                    <div className="label">Planned window</div>
-                    <div className="small">
-                      {(selected.start_date ?? "—")} → {(selected.end_date ?? "—")}
-                    </div>
-                  </div>
-                ) : null}
-
-                {selected.durations ? (
-                  <div>
-                    <div className="label">Durations</div>
-                    <div className="small">
-                      wall: {selected.durations.wall} / billable: {selected.durations.billable}
-                    </div>
-                  </div>
-                ) : null}
-
-                <div>
-                  <div className="label">Dependencies</div>
-                  <div className="small">
-                    {(selected.dependencies || []).length === 0
-                      ? "None"
-                      : selected.dependencies
-                          .map((dep) => displayById.get(dep) || dep)
-                          .join(", ")}
-                  </div>
-                </div>
-
-                {selected.labels && selected.labels.length ? (
-                  <div>
-                    <div className="label">Labels</div>
-                    <div className="small">{selected.labels.join(", ")}</div>
-                  </div>
-                ) : null}
-
-                {selected.assignees && selected.assignees.length ? (
-                  <div>
-                    <div className="label">Assignees</div>
-                    <div className="small">{selected.assignees.join(", ")}</div>
-                  </div>
-                ) : null}
-
-                {selected.url ? (
-                  <div>
-                    <div className="label">GitHub URL</div>
-                    <div className="small" style={{ wordBreak: "break-all" }}>{selected.url}</div>
-                  </div>
-                ) : null}
-
-                {selected.state ? (
-                  <div>
-                    <div className="label">State</div>
-                    <div className="small">{selected.state}</div>
-                  </div>
-                ) : null}
-
-                {selected.notes ? (
-                  <div>
-                    <div className="label">Notes</div>
-                    <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.notes}</pre>
-                  </div>
-                ) : null}
-
-                <details>
-                  <summary className="small" style={{ cursor: "pointer" }}>Raw identifiers</summary>
-                  <div className="small" style={{ marginTop: 8 }}>
-                    <div><span className="mono">Task ID</span>: <span className="mono">{selected.task_id || "—"}</span></div>
-                    <div><span className="mono">Internal id</span>: <span className="mono">{selected.id}</span></div>
-                  </div>
-                </details>
-              </div>
-            </>
-          )}
-        </div>
       </div>
     </div>
   );
