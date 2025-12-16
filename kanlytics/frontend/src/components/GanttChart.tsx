@@ -1,4 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { Edge, GanttLayout, TaskItem } from "../types";
 
 type Props = {
@@ -735,16 +737,116 @@ export const GanttChart: React.FC<Props> = ({
                         {selected.acceptance_criteria ? (
                           <div>
                             <div className="label">Acceptance criteria</div>
-                            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.acceptance_criteria}</pre>
+                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10, background: "var(--card)" }}>
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={{
+                                  a: ({ node, ...props }) => (
+                                    <a {...props} target="_blank" rel="noreferrer" style={{ color: "var(--gantt-selected)" }} />
+                                  ),
+                                  code: ({ node, className, children, ...props }) => {
+                                    const text = String(children ?? "");
+                                    const isInline = !className && !text.includes("\n");
+                                    return (
+                                    <code
+                                      {...props}
+                                      className={className}
+                                      style={{
+                                        fontFamily:
+                                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                        background: isInline ? "rgba(148, 163, 184, 0.18)" : "transparent",
+                                        padding: isInline ? "2px 6px" : undefined,
+                                        borderRadius: isInline ? 8 : undefined,
+                                      }}
+                                    >
+                                      {children}
+                                    </code>
+                                    );
+                                  },
+                                  pre: ({ node, children, ...props }) => (
+                                    <pre
+                                      {...props}
+                                      style={{
+                                        margin: 0,
+                                        overflow: "auto",
+                                        padding: 10,
+                                        borderRadius: 12,
+                                        border: "1px solid var(--border)",
+                                        background: "var(--bg)",
+                                      }}
+                                    >
+                                      {children}
+                                    </pre>
+                                  ),
+                                  h1: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
+                                  h2: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
+                                  h3: ({ node, ...props }) => <h4 style={{ margin: "10px 0 6px" }} {...props} />,
+                                  ul: ({ node, ...props }) => <ul style={{ margin: "6px 0 6px 18px" }} {...props} />,
+                                  ol: ({ node, ...props }) => <ol style={{ margin: "6px 0 6px 18px" }} {...props} />,
+                                  p: ({ node, ...props }) => <p style={{ margin: "6px 0" }} {...props} />,
+                                }}
+                              >
+                                {selected.acceptance_criteria}
+                              </ReactMarkdown>
+                            </div>
                           </div>
                         ) : null}
 
                         {selected.details || selected.body ? (
                           <div>
                             <div className="label">Details</div>
-                            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>
-                              {selected.details || selected.body}
-                            </pre>
+                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10, background: "var(--card)" }}>
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={{
+                                  a: ({ node, ...props }) => (
+                                    <a {...props} target="_blank" rel="noreferrer" style={{ color: "var(--gantt-selected)" }} />
+                                  ),
+                                  code: ({ node, className, children, ...props }) => {
+                                    const text = String(children ?? "");
+                                    const isInline = !className && !text.includes("\n");
+                                    return (
+                                    <code
+                                      {...props}
+                                      className={className}
+                                      style={{
+                                        fontFamily:
+                                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                        background: isInline ? "rgba(148, 163, 184, 0.18)" : "transparent",
+                                        padding: isInline ? "2px 6px" : undefined,
+                                        borderRadius: isInline ? 8 : undefined,
+                                      }}
+                                    >
+                                      {children}
+                                    </code>
+                                    );
+                                  },
+                                  pre: ({ node, children, ...props }) => (
+                                    <pre
+                                      {...props}
+                                      style={{
+                                        margin: 0,
+                                        overflow: "auto",
+                                        padding: 10,
+                                        borderRadius: 12,
+                                        border: "1px solid var(--border)",
+                                        background: "var(--bg)",
+                                      }}
+                                    >
+                                      {children}
+                                    </pre>
+                                  ),
+                                  h1: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
+                                  h2: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
+                                  h3: ({ node, ...props }) => <h4 style={{ margin: "10px 0 6px" }} {...props} />,
+                                  ul: ({ node, ...props }) => <ul style={{ margin: "6px 0 6px 18px" }} {...props} />,
+                                  ol: ({ node, ...props }) => <ol style={{ margin: "6px 0 6px 18px" }} {...props} />,
+                                  p: ({ node, ...props }) => <p style={{ margin: "6px 0" }} {...props} />,
+                                }}
+                              >
+                                {selected.details || selected.body}
+                              </ReactMarkdown>
+                            </div>
                           </div>
                         ) : null}
 
