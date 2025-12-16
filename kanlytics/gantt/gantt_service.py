@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional, Type, Literal
 from uuid import uuid4
 import threading
 import tempfile
 import os
+import time
 
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,10 @@ from mindtrace.services import Service
 from mindtrace.core.types.task_schema import TaskSchema
 
 from .gantt import Gantt
+from kanlytics.core.github_issue import GitHubIssue
+from kanlytics.core.github_project_v2 import GitHubProjectV2, new_uuid
+
+STATUS_OPTIONS = ["Backlog", "Planned", "In Progress", "In Review", "Done"]
 
 
 # ----------------------------
@@ -68,6 +73,48 @@ class LayoutOutput(BaseModel):
     layout: Dict[str, Any]
 
 
+class ConnectProjectInput(BaseModel):
+    project_url: str = Field(..., description="GitHub ProjectV2 board URL (e.g. https://github.com/orgs/<org>/projects/<n>).")
+
+
+class ConnectProjectOutput(BaseModel):
+    task_count: int
+    csv_text: str = Field(..., description="V2 CSV representing the project board items (Task IDs populated).")
+
+
+class ExportProjectInput(BaseModel):
+    plan_id: str
+    project_url: str = Field(..., description="GitHub ProjectV2 board URL (e.g. https://github.com/orgs/<org>/projects/<n>).")
+
+
+class ExportProjectOutput(BaseModel):
+    updated_issues: int = 0
+    updated_draft_issues: int = 0
+    created_draft_issues: int = 0
+    added_existing_issues: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class StartJobOutput(BaseModel):
+    job_id: str
+
+
+class JobStatusInput(BaseModel):
+    job_id: str
+
+
+class JobStatusOutput(BaseModel):
+    job_id: str
+    state: Literal["queued", "running", "completed", "failed"]
+    progress: int = Field(0, ge=0, le=100)
+    message: str = ""
+    # result payload varies by job type:
+    # - connect: {"task_count": int, "csv_text": str}
+    # - export: counts + errors (same as ExportProjectOutput)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
 # ----------------------------
 # TaskSchema Definitions
 # ----------------------------
@@ -88,6 +135,36 @@ layout_task = TaskSchema(
     name="gantt.layout",
     input_schema=LayoutInput,
     output_schema=LayoutOutput,
+)
+
+connect_project_task = TaskSchema(
+    name="github.connect_project",
+    input_schema=ConnectProjectInput,
+    output_schema=ConnectProjectOutput,
+)
+
+export_project_task = TaskSchema(
+    name="github.export_project",
+    input_schema=ExportProjectInput,
+    output_schema=ExportProjectOutput,
+)
+
+connect_project_start_task = TaskSchema(
+    name="github.connect_project_start",
+    input_schema=ConnectProjectInput,
+    output_schema=StartJobOutput,
+)
+
+export_project_start_task = TaskSchema(
+    name="github.export_project_start",
+    input_schema=ExportProjectInput,
+    output_schema=StartJobOutput,
+)
+
+job_status_task = TaskSchema(
+    name="github.job_status",
+    input_schema=JobStatusInput,
+    output_schema=JobStatusOutput,
 )
 
 
@@ -111,6 +188,7 @@ class GanttService(Service):
         self._lock = threading.RLock()
         self._plans: Dict[str, Gantt] = {}
         self._layouts: Dict[str, Dict[str, Any]] = {}
+        self._jobs: Dict[str, JobStatusOutput] = {}
 
         self.app.add_middleware(
             CORSMiddleware,
@@ -126,6 +204,11 @@ class GanttService(Service):
         self.add_endpoint("gantt.create_plan", self.create_plan, schema=create_plan_task)
         self.add_endpoint("gantt.schedule", self.schedule, schema=schedule_task)
         self.add_endpoint("gantt.layout", self.get_layout, schema=layout_task)
+        self.add_endpoint("github.connect_project", self.connect_project, schema=connect_project_task)
+        self.add_endpoint("github.export_project", self.export_project, schema=export_project_task)
+        self.add_endpoint("github.connect_project_start", self.connect_project_start, schema=connect_project_start_task)
+        self.add_endpoint("github.export_project_start", self.export_project_start, schema=export_project_start_task)
+        self.add_endpoint("github.job_status", self.job_status, schema=job_status_task)
 
     # -------------
     # Endpoints
@@ -187,6 +270,412 @@ class GanttService(Service):
 
         return LayoutOutput(plan_id=payload.plan_id, layout=layout)
 
+    def connect_project(self, payload: ConnectProjectInput) -> ConnectProjectOutput:
+        """
+        Download ProjectV2 items (issues + draft issues), ensure each item has a stable
+        "Task ID" (UUID) field, and return a V2 CSV representation suitable for loading
+        into the Gantt planner.
+        """
+        client = GitHubProjectV2(payload.project_url)
+        client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
+        task_id_field_id = client.ensure_text_field("Task ID")
+
+        tasks: list[GitHubIssue] = []
+        for item in client.iter_items():
+            item_id = item.get("id")
+            content = item.get("content") or {}
+            typename = content.get("__typename")
+            if typename not in ("Issue", "DraftIssue"):
+                continue
+            if not item_id:
+                continue
+
+            task_id = client._get_text_field_value(item, "Task ID")
+            if not task_id:
+                task_id = new_uuid()
+                client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+
+            status = client._get_single_select_value(item, "Status") or ""
+            phase = status or "Backlog"
+
+            if typename == "Issue":
+                labels = [n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if (n or {}).get("name")]
+                assignees = [n.get("login") for n in (content.get("assignees") or {}).get("nodes", []) if (n or {}).get("login")]
+                number = content.get("number")
+                issue = GitHubIssue(
+                    task_id=task_id,
+                    id=task_id,
+                    display_task_id=str(number) if isinstance(number, int) else None,
+                    number=number if isinstance(number, int) else None,
+                    title=content.get("title") or "",
+                    body=content.get("body") or "",
+                    state=(content.get("state") or "").lower() if content.get("state") else None,
+                    created_at=content.get("createdAt"),
+                    updated_at=content.get("updatedAt"),
+                    closed_at=content.get("closedAt"),
+                    url=content.get("url"),
+                    labels=[l for l in labels if l],
+                    assignees=[a for a in assignees if a],
+                    phase=phase,
+                    wall_days=1.0,
+                    billable_days=1.0,
+                )
+            else:
+                issue = GitHubIssue(
+                    task_id=task_id,
+                    id=task_id,
+                    title=content.get("title") or "",
+                    body=content.get("body") or "",
+                    state="open",
+                    created_at=content.get("createdAt"),
+                    updated_at=content.get("updatedAt"),
+                    phase=phase,
+                    wall_days=1.0,
+                    billable_days=1.0,
+                )
+
+            tasks.append(issue)
+
+        gantt = Gantt(tasks)
+        return ConnectProjectOutput(task_count=len(tasks), csv_text=gantt.export_csv_v2())
+
+    def connect_project_start(self, payload: ConnectProjectInput) -> StartJobOutput:
+        """
+        Start an async ProjectV2 connect job (for UI progress reporting).
+        """
+        job_id = str(uuid4())
+        status = JobStatusOutput(job_id=job_id, state="queued", progress=0, message="Queued…")
+        with self._lock:
+            self._jobs[job_id] = status
+
+        def run() -> None:
+            try:
+                self._job_update(job_id, state="running", progress=1, message="Connecting to project…")
+                client = GitHubProjectV2(payload.project_url)
+                self._job_update(job_id, progress=3, message="Normalizing Status columns…")
+                client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
+                self._job_update(job_id, progress=5, message="Ensuring Task ID field…")
+                task_id_field_id = client.ensure_text_field("Task ID")
+
+                self._job_update(job_id, progress=10, message="Downloading project items…")
+                items = list(client.iter_items())
+
+                tasks: list[GitHubIssue] = []
+                total = max(1, len(items))
+                for idx, item in enumerate(items):
+                    # 10..90
+                    pct = 10 + int((idx / total) * 80)
+                    self._job_update(job_id, progress=pct, message=f"Importing items… ({idx+1}/{total})")
+
+                    item_id = item.get("id")
+                    content = item.get("content") or {}
+                    typename = content.get("__typename")
+                    if typename not in ("Issue", "DraftIssue") or not item_id:
+                        continue
+
+                    task_id = client._get_text_field_value(item, "Task ID")
+                    if not task_id:
+                        task_id = new_uuid()
+                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+
+                    status_val = client._get_single_select_value(item, "Status") or ""
+                    phase = status_val or "Backlog"
+
+                    if typename == "Issue":
+                        labels = [n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if (n or {}).get("name")]
+                        assignees = [n.get("login") for n in (content.get("assignees") or {}).get("nodes", []) if (n or {}).get("login")]
+                        number = content.get("number")
+                        issue = GitHubIssue(
+                            task_id=task_id,
+                            id=task_id,
+                            display_task_id=str(number) if isinstance(number, int) else None,
+                            number=number if isinstance(number, int) else None,
+                            title=content.get("title") or "",
+                            body=content.get("body") or "",
+                            state=(content.get("state") or "").lower() if content.get("state") else None,
+                            created_at=content.get("createdAt"),
+                            updated_at=content.get("updatedAt"),
+                            closed_at=content.get("closedAt"),
+                            url=content.get("url"),
+                            labels=[l for l in labels if l],
+                            assignees=[a for a in assignees if a],
+                            phase=phase,
+                            wall_days=1.0,
+                            billable_days=1.0,
+                        )
+                    else:
+                        issue = GitHubIssue(
+                            task_id=task_id,
+                            id=task_id,
+                            title=content.get("title") or "",
+                            body=content.get("body") or "",
+                            state="open",
+                            created_at=content.get("createdAt"),
+                            updated_at=content.get("updatedAt"),
+                            phase=phase,
+                            wall_days=1.0,
+                            billable_days=1.0,
+                        )
+
+                    tasks.append(issue)
+
+                self._job_update(job_id, progress=92, message="Generating CSV…")
+                gantt = Gantt(tasks)
+                csv_text = gantt.export_csv_v2()
+                self._job_update(
+                    job_id,
+                    state="completed",
+                    progress=100,
+                    message="Done.",
+                    result={"task_count": len(tasks), "csv_text": csv_text},
+                )
+            except Exception as e:
+                self._job_update(job_id, state="failed", progress=100, message="Failed.", error=str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+        return StartJobOutput(job_id=job_id)
+
+    def export_project(self, payload: ExportProjectInput) -> ExportProjectOutput:
+        """
+        Export the currently-loaded plan to a GitHub ProjectV2 board.
+
+        Behavior:
+          - If a task matches an existing project item via "Task ID", we update it
+            (Issue: PATCH via REST; DraftIssue: updateProjectV2DraftIssue).
+          - If a task doesn't exist remotely:
+              - If it has a GitHub `url`, add that issue to the project and update it.
+              - Otherwise, create a ProjectV2 draft issue.
+          - Always ensure the ProjectV2 item has the "Task ID" field populated.
+        """
+        with self._lock:
+            gantt = self._plans.get(payload.plan_id)
+
+        if gantt is None:
+            raise ValueError(f"Unknown plan_id: {payload.plan_id}")
+
+        client = GitHubProjectV2(payload.project_url)
+        status_field_id, status_option_ids = client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
+        task_id_field_id = client.ensure_text_field("Task ID")
+
+        by_task_id: dict[str, dict[str, Any]] = {}
+        by_issue_url: dict[str, dict[str, Any]] = {}
+
+        for item in client.iter_items():
+            item_id = item.get("id")
+            content = item.get("content") or {}
+            typename = content.get("__typename")
+            if typename not in ("Issue", "DraftIssue") or not item_id:
+                continue
+
+            record = {
+                "item_id": item_id,
+                "type": typename,
+                "issue_url": content.get("url") if typename == "Issue" else None,
+                "issue_node_id": content.get("id") if typename == "Issue" else None,
+                "draft_issue_id": content.get("id") if typename == "DraftIssue" else None,
+            }
+
+            task_id = client._get_text_field_value(item, "Task ID")
+            if task_id:
+                by_task_id[task_id] = record
+            if record.get("issue_url"):
+                by_issue_url[record["issue_url"]] = record
+
+        out = ExportProjectOutput()
+
+        for t in gantt.tasks:
+            task_id = (t.task_id or t.id or "").strip()
+            if not task_id:
+                task_id = new_uuid()
+
+            title = (t.title or t.name or "").strip()
+            body = (t.body or t.details or "").strip()
+            labels = list(t.labels or [])
+            assignees = list(t.assignees or [])
+
+            rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
+
+            try:
+                desired_status = t.phase if (t.phase or "").strip() in status_option_ids else "Backlog"
+                if rec:
+                    # Ensure field is set (idempotent).
+                    client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
+                    client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
+
+                    if rec["type"] == "Issue":
+                        issue_url = t.url or rec.get("issue_url")
+                        if issue_url:
+                            client.update_issue_rest(issue_url=issue_url, title=title or "(untitled)", body=body, labels=labels, assignees=assignees)
+                            out.updated_issues += 1
+                    else:
+                        draft_id = rec.get("draft_issue_id")
+                        if draft_id:
+                            client.update_draft_issue(draft_issue_id=draft_id, title=title or "(untitled)", body=body)
+                            out.updated_draft_issues += 1
+                else:
+                    # New item: add issue (if URL) or create draft issue.
+                    if t.url:
+                        owner, repo, number = client.parse_issue_url(t.url)
+                        issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                        item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                        out.added_existing_issues += 1
+                        # best-effort update to match local fields
+                        client.update_issue_rest(issue_url=t.url, title=title or "(untitled)", body=body, labels=labels, assignees=assignees)
+                        out.updated_issues += 1
+                    else:
+                        item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
+                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                        out.created_draft_issues += 1
+            except Exception as e:
+                out.errors.append(f"{task_id}: {e}")
+
+        return out
+
+    def export_project_start(self, payload: ExportProjectInput) -> StartJobOutput:
+        """
+        Start an async ProjectV2 export job (for UI progress reporting).
+        """
+        job_id = str(uuid4())
+        status = JobStatusOutput(job_id=job_id, state="queued", progress=0, message="Queued…")
+        with self._lock:
+            self._jobs[job_id] = status
+
+        def run() -> None:
+            try:
+                self._job_update(job_id, state="running", progress=1, message="Preparing export…")
+
+                with self._lock:
+                    gantt = self._plans.get(payload.plan_id)
+                if gantt is None:
+                    raise ValueError(f"Unknown plan_id: {payload.plan_id}")
+
+                client = GitHubProjectV2(payload.project_url)
+                self._job_update(job_id, progress=3, message="Normalizing Status columns…")
+                status_field_id, status_option_ids = client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
+                self._job_update(job_id, progress=5, message="Ensuring Task ID field…")
+                task_id_field_id = client.ensure_text_field("Task ID")
+
+                self._job_update(job_id, progress=12, message="Loading existing project items…")
+                items = list(client.iter_items())
+
+                by_task_id: dict[str, dict[str, Any]] = {}
+                by_issue_url: dict[str, dict[str, Any]] = {}
+                for item in items:
+                    item_id = item.get("id")
+                    content = item.get("content") or {}
+                    typename = content.get("__typename")
+                    if typename not in ("Issue", "DraftIssue") or not item_id:
+                        continue
+
+                    record = {
+                        "item_id": item_id,
+                        "type": typename,
+                        "issue_url": content.get("url") if typename == "Issue" else None,
+                        "issue_node_id": content.get("id") if typename == "Issue" else None,
+                        "draft_issue_id": content.get("id") if typename == "DraftIssue" else None,
+                    }
+
+                    task_id = client._get_text_field_value(item, "Task ID")
+                    if task_id:
+                        by_task_id[task_id] = record
+                    if record.get("issue_url"):
+                        by_issue_url[record["issue_url"]] = record
+
+                out = ExportProjectOutput()
+                total = max(1, len(gantt.tasks))
+                for idx, t in enumerate(gantt.tasks):
+                    pct = 15 + int((idx / total) * 80)  # 15..95
+                    self._job_update(job_id, progress=pct, message=f"Exporting tasks… ({idx+1}/{total})")
+
+                    task_id = (t.task_id or t.id or "").strip()
+                    if not task_id:
+                        task_id = new_uuid()
+
+                    title = (t.title or t.name or "").strip()
+                    body = (t.body or t.details or "").strip()
+                    labels = list(t.labels or [])
+                    assignees = list(t.assignees or [])
+
+                    rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
+
+                    try:
+                        desired_status = t.phase if (t.phase or "").strip() in status_option_ids else "Backlog"
+                        if rec:
+                            client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
+                            client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
+
+                            if rec["type"] == "Issue":
+                                issue_url = t.url or rec.get("issue_url")
+                                if issue_url:
+                                    client.update_issue_rest(
+                                        issue_url=issue_url,
+                                        title=title or "(untitled)",
+                                        body=body,
+                                        labels=labels,
+                                        assignees=assignees,
+                                    )
+                                    out.updated_issues += 1
+                            else:
+                                draft_id = rec.get("draft_issue_id")
+                                if draft_id:
+                                    client.update_draft_issue(draft_issue_id=draft_id, title=title or "(untitled)", body=body)
+                                    out.updated_draft_issues += 1
+                        else:
+                            if t.url:
+                                owner, repo, number = client.parse_issue_url(t.url)
+                                issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                                item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                                client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                                out.added_existing_issues += 1
+                                client.update_issue_rest(
+                                    issue_url=t.url,
+                                    title=title or "(untitled)",
+                                    body=body,
+                                    labels=labels,
+                                    assignees=assignees,
+                                )
+                                out.updated_issues += 1
+                            else:
+                                item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
+                                client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                                out.created_draft_issues += 1
+                    except Exception as e:
+                        out.errors.append(f"{task_id}: {e}")
+
+                self._job_update(job_id, progress=98, message="Finalizing…")
+                # tiny delay so UI can show "finalizing" state
+                time.sleep(0.1)
+                self._job_update(
+                    job_id,
+                    state="completed",
+                    progress=100,
+                    message="Done.",
+                    result={
+                        "updated_issues": out.updated_issues,
+                        "updated_draft_issues": out.updated_draft_issues,
+                        "created_draft_issues": out.created_draft_issues,
+                        "added_existing_issues": out.added_existing_issues,
+                        "errors": out.errors,
+                    },
+                )
+            except Exception as e:
+                self._job_update(job_id, state="failed", progress=100, message="Failed.", error=str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+        return StartJobOutput(job_id=job_id)
+
+    def job_status(self, payload: JobStatusInput) -> JobStatusOutput:
+        with self._lock:
+            st = self._jobs.get(payload.job_id)
+        if st is None:
+            raise ValueError(f"Unknown job_id: {payload.job_id}")
+        return st
+
     # -------------
     # Helpers
     # -------------
@@ -209,3 +698,30 @@ class GanttService(Service):
                 os.remove(path)
             except OSError:
                 pass
+
+    def _job_update(
+        self,
+        job_id: str,
+        *,
+        state: Optional[Literal["queued", "running", "completed", "failed"]] = None,
+        progress: Optional[int] = None,
+        message: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            cur = self._jobs.get(job_id)
+            if cur is None:
+                return
+            data = cur.model_dump()
+            if state is not None:
+                data["state"] = state
+            if progress is not None:
+                data["progress"] = int(progress)
+            if message is not None:
+                data["message"] = message
+            if result is not None:
+                data["result"] = result
+            if error is not None:
+                data["error"] = error
+            self._jobs[job_id] = JobStatusOutput(**data)
