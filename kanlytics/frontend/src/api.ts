@@ -1,4 +1,12 @@
-import type { CreatePlanResponse, ScheduleResponse, LayoutResponse } from "./types";
+import type {
+  CreatePlanResponse,
+  ScheduleResponse,
+  LayoutResponse,
+  ConnectProjectResponse,
+  ExportProjectResponse,
+  StartJobResponse,
+  JobStatusResponse,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
 
@@ -35,4 +43,30 @@ export async function schedulePlan(params: {
 
 export async function fetchLayout(planId: string): Promise<LayoutResponse> {
   return postJson<LayoutResponse>("gantt.layout", { plan_id: planId });
+}
+
+export async function connectProject(projectUrl: string): Promise<ConnectProjectResponse> {
+  return postJson<ConnectProjectResponse>("github.connect_project", { project_url: projectUrl });
+}
+
+export async function exportProject(params: { planId: string; projectUrl: string }): Promise<ExportProjectResponse> {
+  return postJson<ExportProjectResponse>("github.export_project", {
+    plan_id: params.planId,
+    project_url: params.projectUrl,
+  });
+}
+
+export async function startConnectProject(projectUrl: string): Promise<StartJobResponse> {
+  return postJson<StartJobResponse>("github.connect_project_start", { project_url: projectUrl });
+}
+
+export async function startExportProject(params: { planId: string; projectUrl: string }): Promise<StartJobResponse> {
+  return postJson<StartJobResponse>("github.export_project_start", {
+    plan_id: params.planId,
+    project_url: params.projectUrl,
+  });
+}
+
+export async function fetchJobStatus(jobId: string): Promise<JobStatusResponse> {
+  return postJson<JobStatusResponse>("github.job_status", { job_id: jobId });
 }

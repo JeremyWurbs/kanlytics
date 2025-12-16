@@ -50,3 +50,24 @@ export type GanttLayout = {
 export type CreatePlanResponse = { plan_id: string; task_count: number; normalized_csv_text: string };
 export type ScheduleResponse = { plan_id: string; layout: GanttLayout };
 export type LayoutResponse = { plan_id: string; layout: GanttLayout };
+
+export type ConnectProjectResponse = { task_count: number; csv_text: string };
+
+export type ExportProjectResponse = {
+  updated_issues: number;
+  updated_draft_issues: number;
+  created_draft_issues: number;
+  added_existing_issues: number;
+  errors: string[];
+};
+
+export type StartJobResponse = { job_id: string };
+
+export type JobStatusResponse = {
+  job_id: string;
+  state: "queued" | "running" | "completed" | "failed";
+  progress: number;
+  message: string;
+  result?: Record<string, any> | null;
+  error?: string | null;
+};

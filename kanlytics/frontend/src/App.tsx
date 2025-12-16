@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createPlan, schedulePlan } from "./api";
+import { createPlan, schedulePlan, connectProject, exportProject, fetchJobStatus, startConnectProject, startExportProject } from "./api";
 import type { GanttLayout } from "./types";
 import { GanttChart } from "./components/GanttChart";
 import "./styles.css";
@@ -24,6 +24,7 @@ export default function App() {
   });
 
   const [kanlyticsOpen, setKanlyticsOpen] = useState<boolean>(true);
+  const [githubOpen, setGithubOpen] = useState<boolean>(true);
   const [sourceOpen, setSourceOpen] = useState<boolean>(true);
   const [ganttSettingsOpen, setGanttSettingsOpen] = useState<boolean>(true);
   const [viewOptionsOpen, setViewOptionsOpen] = useState<boolean>(true);
@@ -45,7 +46,30 @@ export default function App() {
   const [msg, setMsg] = useState<string>("");
   const [err, setErr] = useState<string>("");
 
+  const [githubModalOpen, setGithubModalOpen] = useState<boolean>(false);
+  const [githubModalMode, setGithubModalMode] = useState<"connect" | "export">("connect");
+  const [projectUrl, setProjectUrl] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem("kanlytics.github.projectUrl") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [githubJobId, setGithubJobId] = useState<string>("");
+  const [githubJobProgress, setGithubJobProgress] = useState<number>(0);
+  const [githubJobMessage, setGithubJobMessage] = useState<string>("");
+  const [githubJobState, setGithubJobState] = useState<"queued" | "running" | "completed" | "failed" | "">("");
+
   const hasCsv = useMemo(() => csvText.trim().length > 0, [csvText]);
+
+  const secondaryButtonStyle: React.CSSProperties = useMemo(
+    () => ({
+      background: "var(--card)",
+      color: "var(--text)",
+      border: "1px solid var(--border-2)",
+    }),
+    []
+  );
 
   useEffect(() => {
     const el = document.documentElement;
@@ -69,11 +93,29 @@ export default function App() {
       setMsg("");
       setErr(text);
     }
-    toastTimerRef.current = window.setTimeout(() => {
-      setMsg("");
-      setErr("");
-      toastTimerRef.current = null;
-    }, 3000);
+    // Success toasts auto-dismiss; error toasts persist until manually closed.
+    if (kind === "success") {
+      toastTimerRef.current = window.setTimeout(() => {
+        setMsg("");
+        toastTimerRef.current = null;
+      }, 3000);
+    }
+  }
+
+  function openGithubModal(mode: "connect" | "export") {
+    setGithubModalMode(mode);
+    setGithubModalOpen(true);
+  }
+
+  function closeGithubModal() {
+    setGithubModalOpen(false);
+  }
+
+  function resetGithubProgress() {
+    setGithubJobId("");
+    setGithubJobProgress(0);
+    setGithubJobMessage("");
+    setGithubJobState("");
   }
 
   async function handleFile(file: File) {
@@ -85,6 +127,135 @@ export default function App() {
     const text = await file.text();
     setCsvText(text);
   }
+
+  async function runGithubConnect() {
+    const url = projectUrl.trim();
+    if (!url) {
+      showToast("error", "Please paste a GitHub Project URL.");
+      return;
+    }
+    try {
+      window.localStorage.setItem("kanlytics.github.projectUrl", url);
+    } catch {
+      // ignore
+    }
+
+    setBusy(true);
+    setErr("");
+    setMsg("");
+    resetGithubProgress();
+    try {
+      setGithubJobMessage("Starting import…");
+      const started = await startConnectProject(url);
+      setGithubJobId(started.job_id);
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+      resetGithubProgress();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runGithubExport() {
+    const url = projectUrl.trim();
+    if (!url) {
+      showToast("error", "Please paste a GitHub Project URL.");
+      return;
+    }
+    if (!planId) {
+      showToast("error", "No plan loaded. Load CSV or Connect first.");
+      return;
+    }
+    try {
+      window.localStorage.setItem("kanlytics.github.projectUrl", url);
+    } catch {
+      // ignore
+    }
+
+    setBusy(true);
+    setErr("");
+    setMsg("");
+    resetGithubProgress();
+    try {
+      setGithubJobMessage("Starting export…");
+      const started = await startExportProject({ planId, projectUrl: url });
+      setGithubJobId(started.job_id);
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+      resetGithubProgress();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Poll backend job status while Connect/Export is running, to drive progress UI.
+  useEffect(() => {
+    if (!githubJobId) return;
+
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const st = await fetchJobStatus(githubJobId);
+        if (stopped) return;
+
+        setGithubJobState(st.state);
+        setGithubJobProgress(st.progress ?? 0);
+        setGithubJobMessage(st.message || "");
+
+        if (st.state === "completed") {
+          const mode = githubModalMode;
+          const result = st.result || {};
+
+          if (mode === "connect") {
+            const csv = String((result as any).csv_text || "");
+            const count = Number((result as any).task_count || 0);
+            closeGithubModal();
+            setLayout(null);
+            setPlanId("");
+            setFileName("github-project.csv");
+            if (csv.trim()) setCsvText(csv);
+            showToast("success", `Connected. Imported ${count} items.`);
+          } else {
+            closeGithubModal();
+            const updatedIssues = Number((result as any).updated_issues || 0);
+            const updatedDrafts = Number((result as any).updated_draft_issues || 0);
+            const createdDrafts = Number((result as any).created_draft_issues || 0);
+            const addedIssues = Number((result as any).added_existing_issues || 0);
+            const errors: string[] = Array.isArray((result as any).errors) ? (result as any).errors : [];
+
+            const summary = `Exported. Updated issues=${updatedIssues}, updated drafts=${updatedDrafts}, created drafts=${createdDrafts}, added issues=${addedIssues}.`;
+            if (errors.length) {
+              showToast("error", `${summary} Errors: ${errors.slice(0, 2).join(" | ")}${errors.length > 2 ? " …" : ""}`);
+            } else {
+              showToast("success", summary);
+            }
+          }
+
+          resetGithubProgress();
+          return;
+        }
+
+        if (st.state === "failed") {
+          const msg = st.error || "Export/import failed.";
+          showToast("error", msg);
+          resetGithubProgress();
+          return;
+        }
+      } catch (e: any) {
+        if (stopped) return;
+        showToast("error", e?.message || String(e));
+        resetGithubProgress();
+      }
+    };
+
+    void tick();
+    const id = window.setInterval(() => void tick(), 500);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [githubJobId]);
 
   function saveCsv() {
     if (!hasCsv) {
@@ -218,6 +389,51 @@ export default function App() {
         {/* Panels (collapsible) */}
         {kanlyticsOpen ? (
           <>
+            {/* GitHub panel */}
+            <div
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 14,
+                padding: 12,
+                marginBottom: 12,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setGithubOpen((v) => !v)}
+                aria-expanded={githubOpen}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: 0,
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                  color: "var(--text)",
+                  marginBottom: githubOpen ? 10 : 0,
+                }}
+                title={githubOpen ? "Collapse GitHub" : "Expand GitHub"}
+              >
+                <span className="mono" aria-hidden="true">
+                  {githubOpen ? "▾" : "▸"}
+                </span>
+                <span>GitHub</span>
+              </button>
+
+              {githubOpen ? (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => openGithubModal("connect")} disabled={busy} style={secondaryButtonStyle}>
+                    Connect
+                  </button>
+                  <button type="button" onClick={() => openGithubModal("export")} disabled={busy || !planId} style={secondaryButtonStyle}>
+                    Export
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
             {/* Project Source panel */}
             <div
               style={{
@@ -442,11 +658,136 @@ export default function App() {
 
         {err || msg ? (
           <div style={{ marginTop: 12 }}>
-            {err ? <div className="error">{err}</div> : null}
-            {msg ? <div className="success">{msg}</div> : null}
+            {err ? (
+              <div className="error" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                <div style={{ minWidth: 0, whiteSpace: "pre-wrap" }}>{err}</div>
+                <button
+                  type="button"
+                  onClick={() => setErr("")}
+                  aria-label="Dismiss error"
+                  title="Dismiss"
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border-2)",
+                    background: "var(--card)",
+                    color: "var(--text)",
+                    lineHeight: 1,
+                    flex: "0 0 auto",
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
+            {msg ? (
+              <div className="success" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                <div style={{ minWidth: 0, whiteSpace: "pre-wrap" }}>{msg}</div>
+                <button
+                  type="button"
+                  onClick={() => setMsg("")}
+                  aria-label="Dismiss message"
+                  title="Dismiss"
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border-2)",
+                    background: "var(--card)",
+                    color: "var(--text)",
+                    lineHeight: 1,
+                    flex: "0 0 auto",
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>
+
+      {githubModalOpen ? (
+        <div
+          className="modalBackdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={githubModalMode === "connect" ? "Connect to GitHub Project" : "Export to GitHub Project"}
+          onClick={() => {
+            // Don't allow backdrop-close while a job is running (prevents confusion).
+            if (githubJobId) return;
+            closeGithubModal();
+          }}
+        >
+          <div className="modalCard" onClick={(e) => e.stopPropagation()}>
+            <div className="modalHeader">
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {githubJobId ? <span className="spinner" aria-hidden="true" /> : null}
+                <span>{githubModalMode === "connect" ? "Connect to GitHub Project" : "Export to GitHub Project"}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (githubJobId) return;
+                  closeGithubModal();
+                }}
+                style={{ background: "transparent", border: "1px solid var(--border-2)", color: "var(--text)" }}
+                aria-label="Close"
+                disabled={Boolean(githubJobId)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="label">Project Board URL</div>
+            <input
+              value={projectUrl}
+              onChange={(e) => setProjectUrl(e.target.value)}
+              placeholder="https://github.com/orgs/<org>/projects/<number>"
+              disabled={Boolean(githubJobId)}
+            />
+            <div className="small" style={{ marginTop: 8 }}>
+              {githubModalMode === "connect"
+                ? "Connect will download the project items (issues + drafts), ensure each has a Task ID, and load them into Kanlytics."
+                : "Export will update matching issues/drafts by Task ID, and create drafts for tasks without an issue URL."}
+            </div>
+
+            {githubJobId ? (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                  <div className="small">{githubJobMessage || "Working…"}</div>
+                  <div className="mono small">{githubJobProgress}%</div>
+                </div>
+                <div className="progressTrack" style={{ marginTop: 8 }}>
+                  <div className="progressFill" style={{ width: `${Math.max(0, Math.min(100, githubJobProgress))}%` }} />
+                </div>
+              </div>
+            ) : null}
+
+            <div className="modalActions">
+              <button
+                type="button"
+                onClick={() => {
+                  if (githubJobId) return;
+                  closeGithubModal();
+                }}
+                style={secondaryButtonStyle}
+                disabled={Boolean(githubJobId)}
+              >
+                Cancel
+              </button>
+              {githubModalMode === "connect" ? (
+                <button type="button" onClick={() => void runGithubConnect()} disabled={busy || Boolean(githubJobId)} style={secondaryButtonStyle}>
+                  Connect
+                </button>
+              ) : (
+                <button type="button" onClick={() => void runGithubExport()} disabled={busy || !planId || Boolean(githubJobId)} style={secondaryButtonStyle}>
+                  Export
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="card">
         {!layout ? (

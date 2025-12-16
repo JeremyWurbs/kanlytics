@@ -155,7 +155,7 @@ export const GanttChart: React.FC<Props> = ({
   const [search, setSearch] = useState("");
   const [phaseFilter, setPhaseFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string>("");
-  const [infoOpen, setInfoOpen] = useState<boolean>(true);
+  const [infoOpen, setInfoOpen] = useState<boolean>(false);
 
   const tasks = layout.tasks;
 
@@ -181,6 +181,7 @@ export const GanttChart: React.FC<Props> = ({
     if (!selectedId) return;
     if (tasks.some(t => t.id === selectedId)) return;
     setSelectedId("");
+    setInfoOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.length]);
 
