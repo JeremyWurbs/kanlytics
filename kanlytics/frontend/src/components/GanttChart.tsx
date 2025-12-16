@@ -170,7 +170,8 @@ export const GanttChart: React.FC<Props> = ({
     return tasks.filter(t => {
       if (phaseFilter && (t.phase || "Unphased") !== phaseFilter) return false;
       if (!q) return true;
-      const hay = `${t.id} ${t.name} ${t.details ?? ""}`.toLowerCase();
+      const key = t.display_id || t.display_task_id || t.id;
+      const hay = `${key} ${t.name} ${t.details ?? ""}`.toLowerCase();
       return hay.includes(q);
     });
   }, [tasks, search, phaseFilter]);
@@ -522,7 +523,9 @@ export const GanttChart: React.FC<Props> = ({
                   }}
                   title={t.details || t.name}
                 >
-                  <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "#475569" }}>{t.id}</span>
+                  <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "#475569" }}>
+                    {t.display_id || t.display_task_id || "—"}
+                  </span>
                   <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
                 </div>
               ))}
@@ -677,7 +680,7 @@ export const GanttChart: React.FC<Props> = ({
                       <>
                         <path d={d} fill="none" stroke="#0f172a" strokeWidth={2} opacity={0.9} />
                         <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="#0f172a" style={{ pointerEvents: "none" }}>
-                          {t.id}
+                          {t.display_id || t.display_task_id || ""}
                         </text>
                       </>
                     );
@@ -698,7 +701,7 @@ export const GanttChart: React.FC<Props> = ({
                       fill="#0f172a"
                       style={{ pointerEvents: "none" }}
                     >
-                      {t.id}
+                      {t.display_id || t.display_task_id || ""}
                     </text>
                   </>
                 )}

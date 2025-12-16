@@ -95,6 +95,10 @@ export default function App() {
     try {
       const created = await createPlan(csvText);
       setPlanId(created.plan_id);
+      // Replace template CSV with normalized/instantiated CSV (UUID Task IDs + remapped deps).
+      if (created.normalized_csv_text && created.normalized_csv_text.trim().length > 0) {
+        setCsvText(created.normalized_csv_text);
+      }
 
       const scheduled = await schedulePlan({
         planId: created.plan_id,

@@ -15,6 +15,9 @@ export type TaskLayout = {
 
 export type TaskItem = {
   id: string;
+  display_id?: string;
+  display_task_id?: string | null;
+  task_id?: string | null;
   phase: string;
   name: string;
   details?: string;
@@ -34,6 +37,6 @@ export type GanttLayout = {
   edges: Edge[];
 };
 
-export type CreatePlanResponse = { plan_id: string; task_count: number };
+export type CreatePlanResponse = { plan_id: string; task_count: number; normalized_csv_text: string };
 export type ScheduleResponse = { plan_id: string; layout: GanttLayout };
 export type LayoutResponse = { plan_id: string; layout: GanttLayout };
