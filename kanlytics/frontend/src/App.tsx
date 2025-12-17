@@ -50,6 +50,16 @@ export default function App() {
   });
   const [showDeps, setShowDeps] = useState<boolean>(true);
   const [showDailyGrid, setShowDailyGrid] = useState<boolean>(false);
+  const [showCriticalPath, setShowCriticalPath] = useState<boolean>(() => {
+    try {
+      const raw = window.localStorage.getItem("kanlytics.view.showCriticalPath");
+      if (raw === "0") return false;
+      if (raw === "1") return true;
+      return true; // default on
+    } catch {
+      return true;
+    }
+  });
   const [timeAxisMode, setTimeAxisMode] = useState<"dayCount" | "calendar">("dayCount");
   const [phaseLayout, setPhaseLayout] = useState<"linear" | "stacked">("stacked");
   const [barPadPx, setBarPadPx] = useState<number>(() => {
@@ -126,6 +136,14 @@ export default function App() {
       // ignore
     }
   }, [barPadPx]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("kanlytics.view.showCriticalPath", showCriticalPath ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [showCriticalPath]);
 
   function showToast(kind: "success" | "error", text: string) {
     if (toastTimerRef.current) {
@@ -703,6 +721,14 @@ export default function App() {
                   </div>
 
                   <div>
+                    <div className="label">Critical path</div>
+                    <select value={showCriticalPath ? "yes" : "no"} onChange={(e) => setShowCriticalPath(e.target.value === "yes")}>
+                      <option value="yes">Highlight</option>
+                      <option value="no">Off</option>
+                    </select>
+                  </div>
+
+                  <div>
                     <div className="label">Dark mode</div>
                     <select value={darkMode ? "on" : "off"} onChange={(e) => setDarkMode(e.target.value === "on")}>
                       <option value="off">Off</option>
@@ -876,6 +902,7 @@ export default function App() {
               rowHeight={28}
               showDeps={showDeps}
               showDailyGrid={showDailyGrid}
+              showCriticalPath={showCriticalPath}
               timeAxisMode={timeAxisMode}
               phaseLayout={phaseLayout}
               barPadPx={barPadPx}
