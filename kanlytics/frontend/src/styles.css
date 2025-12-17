@@ -74,7 +74,8 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); }
-.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+/* Use more horizontal space on wide screens */
+.container { max-width: 1600px; margin: 0 auto; padding: 24px; }
 .card {
   background: var(--card);
   border: 1px solid var(--border);

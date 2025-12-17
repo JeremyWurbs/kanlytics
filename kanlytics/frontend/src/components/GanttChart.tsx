@@ -78,6 +78,117 @@ function barPath(
   return d;
 }
 
+function fmtIsoDateTime(s?: string | null): string {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+    return d.toLocaleString();
+  } catch {
+    return s;
+  }
+}
+
+function Pill(props: { text: string; variant?: "neutral" | "blue" | "green" | "red" | "purple"; title?: string }) {
+  const v = props.variant ?? "neutral";
+  const bg =
+    v === "blue"
+      ? "rgba(37, 99, 235, 0.18)"
+      : v === "green"
+        ? "rgba(34, 197, 94, 0.18)"
+        : v === "red"
+          ? "rgba(239, 68, 68, 0.18)"
+          : v === "purple"
+            ? "rgba(168, 85, 247, 0.18)"
+            : "rgba(148, 163, 184, 0.18)";
+  const border =
+    v === "blue"
+      ? "rgba(37, 99, 235, 0.35)"
+      : v === "green"
+        ? "rgba(34, 197, 94, 0.35)"
+        : v === "red"
+          ? "rgba(239, 68, 68, 0.35)"
+          : v === "purple"
+            ? "rgba(168, 85, 247, 0.35)"
+            : "rgba(148, 163, 184, 0.28)";
+  return (
+    <span
+      title={props.title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "3px 10px",
+        borderRadius: 999,
+        border: `1px solid ${border}`,
+        background: bg,
+        color: "var(--text)",
+        fontSize: 12,
+        fontWeight: 600,
+        lineHeight: 1.7,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {props.text}
+    </span>
+  );
+}
+
+function MarkdownBox(props: { markdown: string }) {
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10, background: "var(--card)" }}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ node, ...p }) => <a {...p} target="_blank" rel="noreferrer" style={{ color: "var(--gantt-selected)" }} />,
+          code: ({ node, className, children, ...p }) => {
+            const text = String(children ?? "");
+            const isInline = !className && !text.includes("\n");
+            return (
+              <code
+                {...p}
+                className={className}
+                style={{
+                  fontFamily:
+                    'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                  background: isInline ? "rgba(148, 163, 184, 0.18)" : "transparent",
+                  padding: isInline ? "2px 6px" : undefined,
+                  borderRadius: isInline ? 8 : undefined,
+                }}
+              >
+                {children}
+              </code>
+            );
+          },
+          pre: ({ node, children, ...p }) => (
+            <pre
+              {...p}
+              style={{
+                margin: 0,
+                overflow: "auto",
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid var(--border)",
+                background: "var(--bg)",
+              }}
+            >
+              {children}
+            </pre>
+          ),
+          h1: ({ node, ...p }) => <h3 style={{ margin: "10px 0 6px" }} {...p} />,
+          h2: ({ node, ...p }) => <h3 style={{ margin: "10px 0 6px" }} {...p} />,
+          h3: ({ node, ...p }) => <h4 style={{ margin: "10px 0 6px" }} {...p} />,
+          ul: ({ node, ...p }) => <ul style={{ margin: "6px 0 6px 18px" }} {...p} />,
+          ol: ({ node, ...p }) => <ol style={{ margin: "6px 0 6px 18px" }} {...p} />,
+          p: ({ node, ...p }) => <p style={{ margin: "6px 0" }} {...p} />,
+        }}
+      >
+        {props.markdown}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function buildDepPaths(
   tasks: TaskItem[],
   edges: Edge[],
@@ -198,6 +309,15 @@ export const GanttChart: React.FC<Props> = ({
     }
     return m;
   }, [tasks]);
+
+  const dependentsById = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const e of layout.edges) {
+      if (!m.has(e.from)) m.set(e.from, []);
+      m.get(e.from)!.push(e.to);
+    }
+    return m;
+  }, [layout.edges]);
 
   // Base project start (UTC midnight).
   const baseUtc = useMemo(() => parseIsoDateUtc(layout.meta.project_start) ?? Date.now(), [layout.meta.project_start]);
@@ -682,9 +802,6 @@ export const GanttChart: React.FC<Props> = ({
                   <div style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: 12 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>Task details</div>
-                      <div className="small" style={{ marginTop: 4 }}>
-                        Click tasks in the left list to browse; close to interact with the chart.
-                      </div>
                     </div>
                     <button
                       type="button"
@@ -709,226 +826,240 @@ export const GanttChart: React.FC<Props> = ({
                     <div className="small">No task selected.</div>
                   ) : (
                     <>
-                      <div style={{ display: "grid", gap: 10 }}>
-                        <div>
-                          <div className="label">Display Task ID</div>
-                          <div className="mono">{selected.display_id || selected.display_task_id || "—"}</div>
-                        </div>
+                      {(() => {
+                        const display = selected.display_id || selected.display_task_id || "—";
+                        const title = selected.title || selected.name || "—";
+                        const state = (selected.state || "").toLowerCase();
+                        const stateVariant = state === "closed" ? "red" : "green";
+                        const slackDays = selected.slack_days;
+                        const isCritical = Boolean(selected.is_critical);
+                        const deps = selected.dependencies || [];
+                        const dependents = dependentsById.get(selected.id) || [];
+                        const depDisplay = deps.map((dep) => displayById.get(dep) || dep);
+                        const dependentDisplay = dependents.map((id) => displayById.get(id) || id);
 
-                        <div>
-                          <div className="label">Title</div>
-                          <div style={{ fontWeight: 600 }}>{selected.title || selected.name || "—"}</div>
-                        </div>
+                        const sidebarCard: React.CSSProperties = {
+                          border: "1px solid var(--border)",
+                          borderRadius: 14,
+                          padding: 12,
+                          background: "var(--card)",
+                        };
 
-                        {selected.phase ? (
-                          <div>
-                            <div className="label">Phase</div>
-                            <div>{selected.phase}</div>
-                          </div>
-                        ) : null}
+                        const statusText = (() => {
+                          // Today we treat GitHub Status as a board column and we don't have a dedicated field yet.
+                          // Show a best-effort label, but keep the original phase visible separately.
+                          const ph = (selected.phase || "").trim();
+                          const known = new Set(["Backlog", "Planned", "In Progress", "In Review", "Done"]);
+                          return known.has(ph) ? ph : "Backlog";
+                        })();
 
-                        {selected.milestone_or_output ? (
-                          <div>
-                            <div className="label">Milestone / Output</div>
-                            <div>{selected.milestone_or_output}</div>
-                          </div>
-                        ) : null}
+                        return (
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "1fr 320px",
+                              gap: 16,
+                              alignItems: "start",
+                              minWidth: 0,
+                            }}
+                          >
+                            {/* Left column: main content */}
+                            <div style={{ minWidth: 0 }}>
+                              {/* Header */}
+                              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.2, marginBottom: 8 }}>
+                                    {title}
+                                  </div>
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                                    <Pill text={state ? state.charAt(0).toUpperCase() + state.slice(1) : "Open"} variant={stateVariant as any} />
+                                    <Pill text={`Status: ${statusText}`} variant="blue" />
+                                    <Pill text={`ID: ${display}`} variant="neutral" />
+                                    {isCritical ? <Pill text="Critical path" variant="red" title="Slack = 0 days" /> : null}
+                                    {typeof slackDays === "number" ? <Pill text={`Slack: ${slackDays}d`} variant="purple" /> : null}
+                                  </div>
+                                </div>
+                                {selected.url ? (
+                                  <a
+                                    href={selected.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{
+                                      color: "var(--gantt-selected)",
+                                      fontWeight: 700,
+                                      textDecoration: "none",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    Open on GitHub
+                                  </a>
+                                ) : null}
+                              </div>
 
-                        {selected.acceptance_criteria ? (
-                          <div>
-                            <div className="label">Acceptance criteria</div>
-                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10, background: "var(--card)" }}>
-                              <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
-                                components={{
-                                  a: ({ node, ...props }) => (
-                                    <a {...props} target="_blank" rel="noreferrer" style={{ color: "var(--gantt-selected)" }} />
-                                  ),
-                                  code: ({ node, className, children, ...props }) => {
-                                    const text = String(children ?? "");
-                                    const isInline = !className && !text.includes("\n");
-                                    return (
-                                    <code
-                                      {...props}
-                                      className={className}
-                                      style={{
-                                        fontFamily:
-                                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-                                        background: isInline ? "rgba(148, 163, 184, 0.18)" : "transparent",
-                                        padding: isInline ? "2px 6px" : undefined,
-                                        borderRadius: isInline ? 8 : undefined,
-                                      }}
-                                    >
-                                      {children}
-                                    </code>
-                                    );
-                                  },
-                                  pre: ({ node, children, ...props }) => (
-                                    <pre
-                                      {...props}
-                                      style={{
-                                        margin: 0,
-                                        overflow: "auto",
-                                        padding: 10,
-                                        borderRadius: 12,
-                                        border: "1px solid var(--border)",
-                                        background: "var(--bg)",
-                                      }}
-                                    >
-                                      {children}
-                                    </pre>
-                                  ),
-                                  h1: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
-                                  h2: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
-                                  h3: ({ node, ...props }) => <h4 style={{ margin: "10px 0 6px" }} {...props} />,
-                                  ul: ({ node, ...props }) => <ul style={{ margin: "6px 0 6px 18px" }} {...props} />,
-                                  ol: ({ node, ...props }) => <ol style={{ margin: "6px 0 6px 18px" }} {...props} />,
-                                  p: ({ node, ...props }) => <p style={{ margin: "6px 0" }} {...props} />,
-                                }}
-                              >
-                                {selected.acceptance_criteria}
-                              </ReactMarkdown>
+                              <div style={{ height: 12 }} />
+
+                              {/* Body */}
+                              <div>
+                                <div className="label">Description</div>
+                                <MarkdownBox markdown={selected.details || selected.body || ""} />
+                              </div>
+
+                              {selected.acceptance_criteria ? (
+                                <>
+                                  <div style={{ height: 12 }} />
+                                  <div>
+                                    <div className="label">Acceptance criteria</div>
+                                    <MarkdownBox markdown={selected.acceptance_criteria} />
+                                  </div>
+                                </>
+                              ) : null}
+
+                              {/* Activity / history */}
+                              <div style={{ height: 12 }} />
+                              <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                                <div style={{ fontWeight: 800, marginBottom: 8 }}>Activity</div>
+                                <div style={{ display: "grid", gap: 8 }}>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Scheduled</span>: {selected.schedule.start} → {selected.schedule.end}
+                                  </div>
+                                  {selected.start_date || selected.end_date ? (
+                                    <div className="small">
+                                      <span style={{ fontWeight: 700 }}>Planned window</span>: {(selected.start_date ?? "—")} → {(selected.end_date ?? "—")}
+                                    </div>
+                                  ) : null}
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Dependencies</span>: {depDisplay.length ? depDisplay.join(", ") : "None"}
+                                  </div>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Dependents</span>: {dependentDisplay.length ? dependentDisplay.join(", ") : "None"}
+                                  </div>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Created</span>: {fmtIsoDateTime((selected as any).created_at)}
+                                  </div>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Updated</span>: {fmtIsoDateTime((selected as any).updated_at)}
+                                  </div>
+                                  {(selected as any).closed_at ? (
+                                    <div className="small">
+                                      <span style={{ fontWeight: 700 }}>Closed</span>: {fmtIsoDateTime((selected as any).closed_at)}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Right column: sidebar */}
+                            <div style={{ display: "grid", gap: 12 }}>
+                              <div style={sidebarCard}>
+                                <div style={{ fontWeight: 800, marginBottom: 8 }}>Details</div>
+                                <div style={{ display: "grid", gap: 8 }}>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Display ID</span>: <span className="mono">{display}</span>
+                                  </div>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Phase</span>: {selected.phase || "—"}
+                                  </div>
+                                  {selected.durations ? (
+                                    <div className="small">
+                                      <span style={{ fontWeight: 700 }}>Durations</span>: wall {selected.durations.wall}d / billable{" "}
+                                      {selected.durations.billable}d
+                                    </div>
+                                  ) : null}
+                                  {selected.milestone_or_output ? (
+                                    <div className="small">
+                                      <span style={{ fontWeight: 700 }}>Milestone</span>: {selected.milestone_or_output}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+
+                              <div style={sidebarCard}>
+                                <div style={{ fontWeight: 800, marginBottom: 8 }}>Assignees</div>
+                                {selected.assignees && selected.assignees.length ? (
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                    {selected.assignees.map((a) => (
+                                      <Pill key={a} text={a} variant="neutral" />
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="small">None</div>
+                                )}
+                              </div>
+
+                              <div style={sidebarCard}>
+                                <div style={{ fontWeight: 800, marginBottom: 8 }}>Labels</div>
+                                {selected.labels && selected.labels.length ? (
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                    {selected.labels.map((l) => (
+                                      <Pill key={l} text={l} variant="blue" />
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="small">None</div>
+                                )}
+                              </div>
+
+                              <div style={sidebarCard}>
+                                <div style={{ fontWeight: 800, marginBottom: 8 }}>Dependencies</div>
+                                {depDisplay.length ? (
+                                  <div style={{ display: "grid", gap: 6 }}>
+                                    {depDisplay.map((d) => (
+                                      <div key={d} className="small">
+                                        {d}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="small">None</div>
+                                )}
+                              </div>
+
+                              <div style={sidebarCard}>
+                                <div style={{ fontWeight: 800, marginBottom: 8 }}>Dependents</div>
+                                {dependentDisplay.length ? (
+                                  <div style={{ display: "grid", gap: 6 }}>
+                                    {dependentDisplay.map((d) => (
+                                      <div key={d} className="small">
+                                        {d}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="small">None</div>
+                                )}
+                              </div>
+
+                              {selected.notes ? (
+                                <div style={sidebarCard}>
+                                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Notes</div>
+                                  <div style={{ whiteSpace: "pre-wrap" }} className="small">
+                                    {selected.notes}
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              <details style={sidebarCard as any}>
+                                <summary className="small" style={{ cursor: "pointer", fontWeight: 800 }}>
+                                  Raw identifiers
+                                </summary>
+                                <div className="small" style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                                  <div>
+                                    <span className="mono">Task ID</span>: <span className="mono">{selected.task_id || "—"}</span>
+                                  </div>
+                                  <div>
+                                    <span className="mono">Internal id</span>: <span className="mono">{selected.id}</span>
+                                  </div>
+                                  {selected.url ? (
+                                    <div style={{ wordBreak: "break-all" }}>
+                                      <span className="mono">URL</span>: <span className="mono">{selected.url}</span>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </details>
                             </div>
                           </div>
-                        ) : null}
-
-                        {selected.details || selected.body ? (
-                          <div>
-                            <div className="label">Details</div>
-                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 10, background: "var(--card)" }}>
-                              <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
-                                components={{
-                                  a: ({ node, ...props }) => (
-                                    <a {...props} target="_blank" rel="noreferrer" style={{ color: "var(--gantt-selected)" }} />
-                                  ),
-                                  code: ({ node, className, children, ...props }) => {
-                                    const text = String(children ?? "");
-                                    const isInline = !className && !text.includes("\n");
-                                    return (
-                                    <code
-                                      {...props}
-                                      className={className}
-                                      style={{
-                                        fontFamily:
-                                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-                                        background: isInline ? "rgba(148, 163, 184, 0.18)" : "transparent",
-                                        padding: isInline ? "2px 6px" : undefined,
-                                        borderRadius: isInline ? 8 : undefined,
-                                      }}
-                                    >
-                                      {children}
-                                    </code>
-                                    );
-                                  },
-                                  pre: ({ node, children, ...props }) => (
-                                    <pre
-                                      {...props}
-                                      style={{
-                                        margin: 0,
-                                        overflow: "auto",
-                                        padding: 10,
-                                        borderRadius: 12,
-                                        border: "1px solid var(--border)",
-                                        background: "var(--bg)",
-                                      }}
-                                    >
-                                      {children}
-                                    </pre>
-                                  ),
-                                  h1: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
-                                  h2: ({ node, ...props }) => <h3 style={{ margin: "10px 0 6px" }} {...props} />,
-                                  h3: ({ node, ...props }) => <h4 style={{ margin: "10px 0 6px" }} {...props} />,
-                                  ul: ({ node, ...props }) => <ul style={{ margin: "6px 0 6px 18px" }} {...props} />,
-                                  ol: ({ node, ...props }) => <ol style={{ margin: "6px 0 6px 18px" }} {...props} />,
-                                  p: ({ node, ...props }) => <p style={{ margin: "6px 0" }} {...props} />,
-                                }}
-                              >
-                                {selected.details || selected.body}
-                              </ReactMarkdown>
-                            </div>
-                          </div>
-                        ) : null}
-
-                        <div>
-                          <div className="label">Schedule</div>
-                          <div className="small">
-                            {selected.schedule.start} → {selected.schedule.end}
-                          </div>
-                        </div>
-
-                        {selected.start_date || selected.end_date ? (
-                          <div>
-                            <div className="label">Planned window</div>
-                            <div className="small">
-                              {(selected.start_date ?? "—")} → {(selected.end_date ?? "—")}
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {selected.durations ? (
-                          <div>
-                            <div className="label">Durations</div>
-                            <div className="small">
-                              wall: {selected.durations.wall} / billable: {selected.durations.billable}
-                            </div>
-                          </div>
-                        ) : null}
-
-                        <div>
-                          <div className="label">Dependencies</div>
-                          <div className="small">
-                            {(selected.dependencies || []).length === 0
-                              ? "None"
-                              : selected.dependencies
-                                  .map((dep) => displayById.get(dep) || dep)
-                                  .join(", ")}
-                          </div>
-                        </div>
-
-                        {selected.labels && selected.labels.length ? (
-                          <div>
-                            <div className="label">Labels</div>
-                            <div className="small">{selected.labels.join(", ")}</div>
-                          </div>
-                        ) : null}
-
-                        {selected.assignees && selected.assignees.length ? (
-                          <div>
-                            <div className="label">Assignees</div>
-                            <div className="small">{selected.assignees.join(", ")}</div>
-                          </div>
-                        ) : null}
-
-                        {selected.url ? (
-                          <div>
-                            <div className="label">GitHub URL</div>
-                            <div className="small" style={{ wordBreak: "break-all" }}>{selected.url}</div>
-                          </div>
-                        ) : null}
-
-                        {selected.state ? (
-                          <div>
-                            <div className="label">State</div>
-                            <div className="small">{selected.state}</div>
-                          </div>
-                        ) : null}
-
-                        {selected.notes ? (
-                          <div>
-                            <div className="label">Notes</div>
-                            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}>{selected.notes}</pre>
-                          </div>
-                        ) : null}
-
-                        <details>
-                          <summary className="small" style={{ cursor: "pointer" }}>Raw identifiers</summary>
-                          <div className="small" style={{ marginTop: 8 }}>
-                            <div><span className="mono">Task ID</span>: <span className="mono">{selected.task_id || "—"}</span></div>
-                            <div><span className="mono">Internal id</span>: <span className="mono">{selected.id}</span></div>
-                          </div>
-                        </details>
-                      </div>
+                        );
+                      })()}
                     </>
                   )}
                 </div>
