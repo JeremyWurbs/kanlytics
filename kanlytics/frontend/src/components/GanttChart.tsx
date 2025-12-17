@@ -10,7 +10,9 @@ type Props = {
   showDeps?: boolean;
   showDailyGrid?: boolean;
   showCriticalPath?: boolean;
-  timeAxisMode?: "dayCount" | "calendar";
+  detailMode?: "all" | "phaseSummary";
+  projectName?: string;
+  timeAxisMode?: "dayCount" | "calendar" | "weeks";
   phaseLayout?: "linear" | "stacked";
   barPadPx?: number;
 };
@@ -269,6 +271,8 @@ export const GanttChart: React.FC<Props> = ({
   showDeps = true,
   showDailyGrid = false,
   showCriticalPath = true,
+  detailMode = "all",
+  projectName = "",
   timeAxisMode = "dayCount",
   phaseLayout = "stacked",
   barPadPx = 0,
@@ -280,6 +284,11 @@ export const GanttChart: React.FC<Props> = ({
   const [infoOpen, setInfoOpen] = useState<boolean>(false);
 
   const tasks = layout.tasks;
+  const phaseSummary = detailMode === "phaseSummary";
+  const weeksMode = timeAxisMode === "weeks";
+  const unitDays = weeksMode ? 7 : 1;
+  const criticalPathIds = useMemo(() => (layout.meta.critical_path || []) as string[], [layout.meta.critical_path]);
+  const criticalSet = useMemo(() => new Set(criticalPathIds), [criticalPathIds]);
 
   const phases = useMemo(() => {
     const s = new Set<string>();
@@ -288,7 +297,9 @@ export const GanttChart: React.FC<Props> = ({
   }, [tasks]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    // In phase summary mode, we don't show per-task rows, so task search is not useful.
+    // Keep phaseFilter behavior (if it's set via previous view), but ignore text search.
+    const q = phaseSummary ? "" : search.trim().toLowerCase();
     return tasks.filter(t => {
       if (phaseFilter && (t.phase || "Unphased") !== phaseFilter) return false;
       if (!q) return true;
@@ -296,7 +307,20 @@ export const GanttChart: React.FC<Props> = ({
       const hay = `${key} ${t.name} ${t.details ?? ""}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [tasks, search, phaseFilter]);
+  }, [tasks, search, phaseFilter, phaseSummary]);
+
+  const renderTasks = useMemo(() => {
+    if (!phaseSummary) return filtered;
+    // Only render critical-path tasks in phase summary view.
+    // Also drop 0-day milestones/diamonds in this view to avoid visual pile-ups.
+    return tasks.filter(t => criticalSet.has(t.id) && (t.schedule.w ?? 0) > 0);
+  }, [phaseSummary, filtered, tasks, criticalSet]);
+
+  const renderTasksNoMilestones = useMemo(() => {
+    if (!weeksMode) return renderTasks;
+    // Weeks view shows aggregated bubbles; drop 0-day tasks entirely.
+    return renderTasks.filter(t => (t.schedule.w ?? 0) > 0);
+  }, [renderTasks, weeksMode]);
 
   // If the selected task disappears (new plan/filtering), clear selection.
   useEffect(() => {
@@ -333,7 +357,8 @@ export const GanttChart: React.FC<Props> = ({
 
   const spanById = useMemo(() => {
     const m = new Map<string, { xDay: number; wDay: number }>();
-    for (const t of filtered) {
+    const MS_DAY = 24 * 60 * 60 * 1000;
+    for (const t of renderTasksNoMilestones) {
       const startUtc = parseIsoDateUtc(t.schedule.start);
       const endUtc = parseIsoDateUtc(t.schedule.end);
       if (startUtc == null || endUtc == null) {
@@ -341,21 +366,33 @@ export const GanttChart: React.FC<Props> = ({
         m.set(t.id, { xDay: t.schedule.x ?? 0, wDay: t.schedule.w ?? 0 });
         continue;
       }
-      const xDay = Math.max(0, Math.floor((startUtc - baseUtc) / (24 * 60 * 60 * 1000)));
+      const startDay = Math.max(0, Math.floor((startUtc - baseUtc) / MS_DAY));
       // Normally we use inclusive calendar-day span (end-start+1) so working-days schedules
       // can show weekend gaps. However, true milestones have schedule.w === 0 and should
       // render as a point (diamond) and not consume a day.
-      const wDay =
-        (t.schedule.w ?? 0) === 0 ? 0 : Math.max(0, Math.floor((endUtc - startUtc) / (24 * 60 * 60 * 1000)) + 1); // inclusive end
-      m.set(t.id, { xDay, wDay });
+      const daySpan =
+        (t.schedule.w ?? 0) === 0 ? 0 : Math.max(0, Math.floor((endUtc - startUtc) / MS_DAY) + 1); // inclusive end
+
+      if (!weeksMode) {
+        m.set(t.id, { xDay: startDay, wDay: daySpan });
+        continue;
+      }
+
+      if (daySpan <= 0) {
+        m.set(t.id, { xDay: startDay / 7, wDay: 0 });
+        continue;
+      }
+      // Weeks mode uses fractional week coordinates so bars end on the correct day boundary.
+      // xDay/wDay here are actually "xWeek / wWeek" units.
+      m.set(t.id, { xDay: startDay / 7, wDay: daySpan / 7 });
     }
     return m;
-  }, [filtered, baseUtc]);
+  }, [renderTasksNoMilestones, baseUtc, weeksMode]);
 
   const phaseStartByPhase = useMemo(() => {
     const m = new Map<string, number>();
     if (phaseLayout !== "stacked") return m;
-    for (const t of filtered) {
+    for (const t of renderTasksNoMilestones) {
       const span = spanById.get(t.id);
       if (!span) continue;
       const ph = t.phase || "Unphased";
@@ -363,16 +400,16 @@ export const GanttChart: React.FC<Props> = ({
       m.set(ph, cur == null ? span.xDay : Math.min(cur, span.xDay));
     }
     return m;
-  }, [filtered, spanById, phaseLayout]);
+  }, [renderTasksNoMilestones, spanById, phaseLayout]);
 
   const baseUtcByPhase = useMemo(() => {
     const m = new Map<string, number>();
     if (phaseLayout !== "stacked") return m;
     for (const [ph, startDay] of phaseStartByPhase.entries()) {
-      m.set(ph, baseUtc + startDay * 24 * 60 * 60 * 1000);
+      m.set(ph, baseUtc + startDay * unitDays * 24 * 60 * 60 * 1000);
     }
     return m;
-  }, [phaseStartByPhase, baseUtc, phaseLayout]);
+  }, [phaseStartByPhase, baseUtc, phaseLayout, unitDays]);
 
   const drawSpanById = useMemo(() => {
     // The spans used for drawing bars (xDay in chart coordinates).
@@ -380,7 +417,7 @@ export const GanttChart: React.FC<Props> = ({
     // - stacked: normalize each phase so its min start aligns to x=0
     if (phaseLayout !== "stacked") return spanById;
     const m = new Map<string, { xDay: number; wDay: number }>();
-    for (const t of filtered) {
+    for (const t of renderTasksNoMilestones) {
       const span = spanById.get(t.id);
       if (!span) continue;
       const ph = t.phase || "Unphased";
@@ -388,7 +425,7 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, { xDay: Math.max(0, span.xDay - off), wDay: span.wDay });
     }
     return m;
-  }, [filtered, spanById, phaseStartByPhase, phaseLayout]);
+  }, [renderTasksNoMilestones, spanById, phaseStartByPhase, phaseLayout]);
 
   const segmentsById = useMemo(() => {
     // If the backend is scheduling in working-day mode, split bars across weekends:
@@ -407,15 +444,15 @@ export const GanttChart: React.FC<Props> = ({
       return dow === 0 || dow === 6;
     };
 
-    const splitOnWeekends = Boolean(layout.meta.working_days);
+    const splitOnWeekends = Boolean(layout.meta.working_days) && !weeksMode;
 
-    for (const t of filtered) {
+    for (const t of renderTasksNoMilestones) {
       const span = drawSpanById.get(t.id);
       if (!span) continue;
 
-      // Milestones: render as diamonds elsewhere; no segments.
-      if (span.wDay === 0) {
-        m.set(t.id, []);
+      // Weeks mode: treat each task as a single continuous segment.
+      if (weeksMode) {
+        m.set(t.id, [{ xDay: span.xDay, wDay: Math.max(0, span.wDay), roundLeft: true, roundRight: true }]);
         continue;
       }
 
@@ -466,15 +503,23 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, segs);
     }
     return m;
-  }, [filtered, drawSpanById, baseUtc, baseUtcByPhase, phaseLayout, layout.meta.working_days]);
+  }, [renderTasksNoMilestones, drawSpanById, baseUtc, baseUtcByPhase, phaseLayout, layout.meta.working_days, weeksMode]);
 
   const barEndsById = useMemo(() => {
     // For arrows: use the first segment start and last segment end (in day units).
     const m = new Map<string, { startXDay: number; endXDay: number }>();
-    for (const t of filtered) {
+    for (const t of renderTasksNoMilestones) {
       const segs = segmentsById.get(t.id) || [];
       const span = drawSpanById.get(t.id);
       if (!span) continue;
+
+      if (weeksMode) {
+        // Weeks mode uses fractional units; use exact span without rounding to full weeks.
+        const startXDay = span.xDay;
+        const endXDay = span.xDay + Math.max(0, span.wDay);
+        m.set(t.id, { startXDay, endXDay });
+        continue;
+      }
 
       if (span.wDay === 0) {
         // Milestone point: center of the day cell.
@@ -496,46 +541,77 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, { startXDay, endXDay });
     }
     return m;
-  }, [filtered, segmentsById, drawSpanById]);
+  }, [renderTasksNoMilestones, segmentsById, drawSpanById, weeksMode]);
 
   const maxXDay = useMemo(() => {
     let m = 0;
-    for (const t of filtered) {
+    for (const t of renderTasksNoMilestones) {
       const ends = barEndsById.get(t.id);
       if (!ends) continue;
       m = Math.max(m, ends.endXDay);
     }
     return m;
-  }, [filtered, barEndsById]);
+  }, [renderTasksNoMilestones, barEndsById]);
 
   const width = Math.max(900, (maxXDay + 5) * pxPerDay);
   const chartPadLeft = 10; // pixels of breathing room at left edge
   const svgWidth = width + chartPadLeft;
   const groups = useMemo(() => groupByPhase(filtered), [filtered]);
 
+  const phaseRows = useMemo(() => {
+    // Build phase row order from the full plan (stable by earliest schedule row).
+    const byPhase = new Map<string, number>();
+    for (const t of tasks) {
+      const ph = t.phase || "Unphased";
+      const cur = byPhase.get(ph);
+      byPhase.set(ph, cur == null ? t.schedule.row : Math.min(cur, t.schedule.row));
+    }
+    return Array.from(byPhase.entries())
+      .sort((a, b) => a[1] - b[1])
+      .map(([ph]) => ph);
+  }, [tasks]);
+
   // Build a "display row model" that both panes use. This fixes misalignment when
   // the left pane includes phase header rows (extra vertical height) but the SVG
   // uses schedule.row directly.
   type DisplayRow =
+    | { kind: "project"; name: string }
     | { kind: "phase"; phase: string }
     | { kind: "task"; task: TaskItem };
 
   const displayRows = useMemo<DisplayRow[]>(() => {
     const rows: DisplayRow[] = [];
+    if (phaseSummary) {
+      rows.push({ kind: "project", name: projectName.trim() || "Project" });
+      for (const ph of phaseRows) rows.push({ kind: "phase", phase: ph });
+      return rows;
+    }
     for (const g of groups) {
       rows.push({ kind: "phase", phase: g.phase });
       for (const t of g.tasks) rows.push({ kind: "task", task: t });
     }
     return rows;
-  }, [groups]);
+  }, [groups, phaseSummary, phaseRows, projectName]);
 
   const rowIndexById = useMemo(() => {
     const m = new Map<string, number>();
+    if (phaseSummary) {
+      const idxByPhase = new Map<string, number>();
+      displayRows.forEach((r, idx) => {
+        if (r.kind === "phase") idxByPhase.set(r.phase, idx);
+      });
+      for (const t of renderTasks) {
+        const ph = t.phase || "Unphased";
+        const rowIdx = idxByPhase.get(ph);
+        if (rowIdx != null) m.set(t.id, rowIdx);
+      }
+      return m;
+    }
     displayRows.forEach((r, idx) => {
       if (r.kind === "task") m.set(r.task.id, idx);
     });
     return m;
-  }, [displayRows]);
+  }, [displayRows, phaseSummary, renderTasks]);
 
   const phaseSections = useMemo(() => {
     // Find each phase header row, and the y-range it covers (until next phase header).
@@ -558,15 +634,15 @@ export const GanttChart: React.FC<Props> = ({
     const m = new Map<string, number>();
     for (const sec of phaseSections) m.set(sec.phase, sec.headerRowIdx);
     return m;
-  }, [phaseSections]);
+  }, [phaseSections, phaseSummary]);
 
   const height = useMemo(() => Math.max(220, (displayRows.length + 1) * rowHeight), [displayRows.length, rowHeight]);
 
   const depPaths = useMemo(
     () =>
-      showDeps
+      showDeps && !phaseSummary && !weeksMode
         ? buildDepPaths(
-            filtered,
+            renderTasks,
             layout.edges,
             rowIndexById,
             drawSpanById,
@@ -581,7 +657,7 @@ export const GanttChart: React.FC<Props> = ({
           )
         : [],
     [
-      filtered,
+      renderTasks,
       layout.edges,
       rowIndexById,
       drawSpanById,
@@ -593,8 +669,59 @@ export const GanttChart: React.FC<Props> = ({
       rowHeight,
       showDeps,
       barPadPx,
+      phaseSummary,
+      weeksMode,
     ]
   );
+
+  const rowBubbles = useMemo(() => {
+    const bubbleMode = weeksMode || (phaseSummary && phaseLayout === "stacked");
+    if (!bubbleMode) return [];
+
+    type Bubble = {
+      rowIdx: number;
+      startX: number;
+      endX: number;
+      repId: string;
+      isCritical: boolean;
+      startUtc: number | null;
+    };
+    const byRow = new Map<number, Bubble>();
+
+    for (const t of renderTasksNoMilestones) {
+      const span = drawSpanById.get(t.id);
+      if (!span) continue;
+      const rowIdx = rowIndexById.get(t.id);
+      if (rowIdx == null) continue;
+
+      const startX = span.xDay;
+      const endX = span.xDay + Math.max(0, span.wDay);
+      const isCritical = Boolean(t.is_critical || (t.slack_days ?? 0) === 0);
+      const startUtc = parseIsoDateUtc(t.schedule.start);
+
+      const cur = byRow.get(rowIdx);
+      if (!cur) {
+        byRow.set(rowIdx, {
+          rowIdx,
+          startX,
+          endX,
+          repId: t.id,
+          isCritical,
+          startUtc,
+        });
+        continue;
+      }
+      cur.startX = Math.min(cur.startX, startX);
+      cur.endX = Math.max(cur.endX, endX);
+      cur.isCritical = cur.isCritical || isCritical;
+      cur.startUtc = cur.startUtc == null ? startUtc : startUtc == null ? cur.startUtc : Math.min(cur.startUtc, startUtc);
+      // Representative id: keep the earliest-starting task for stable selection.
+      if (startX < (drawSpanById.get(cur.repId)?.xDay ?? Number.POSITIVE_INFINITY)) cur.repId = t.id;
+      byRow.set(rowIdx, cur);
+    }
+
+    return Array.from(byRow.values()).sort((a, b) => a.rowIdx - b.rowIdx);
+  }, [weeksMode, phaseSummary, phaseLayout, renderTasksNoMilestones, drawSpanById, rowIndexById]);
 
   const ticks = useMemo(() => {
     const N = Math.ceil(width / pxPerDay);
@@ -610,6 +737,13 @@ export const GanttChart: React.FC<Props> = ({
 
   const formatTickForBase = useMemo(() => {
     const MS_DAY = 24 * 60 * 60 * 1000;
+    if (timeAxisMode === "weeks") {
+      return (base: number, d: number) => {
+        const offsetDays = Math.round((base - baseUtc) / MS_DAY);
+        const offsetWeeks = Math.floor(offsetDays / 7);
+        return String(offsetWeeks + d);
+      };
+    }
     if (timeAxisMode !== "calendar") {
       // In stacked layout each phase uses its own "base" (min start within that phase).
       // For a global day counter, offset each phase by how many calendar days it starts
@@ -628,6 +762,12 @@ export const GanttChart: React.FC<Props> = ({
   const dayBands = useMemo(() => {
     // Background banding for LINEAR mode (single global axis).
     const out: { d: number; fill: string }[] = [];
+    if (weeksMode) {
+      for (let d = 0; d <= dayCount; d += 1) {
+        out.push({ d, fill: d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)" });
+      }
+      return out;
+    }
     let workdayIdx = 0;
     for (let d = 0; d <= dayCount; d += 1) {
       const t = baseUtc + d * 24 * 60 * 60 * 1000;
@@ -642,7 +782,7 @@ export const GanttChart: React.FC<Props> = ({
       }
     }
     return out;
-  }, [baseUtc, dayCount]);
+  }, [baseUtc, dayCount, weeksMode]);
 
   function selectTask(id: string) {
     setSelectedId(id);
@@ -671,6 +811,8 @@ export const GanttChart: React.FC<Props> = ({
   const headerHeight = 112;
 
   const linearAxisRowIdx = useMemo(() => {
+    // In phase summary mode, the first row is the project header; axis should live there.
+    if (phaseSummary) return 0;
     if (!phaseSections.length) return 0;
     let m = phaseSections[0].headerRowIdx;
     for (const sec of phaseSections) m = Math.min(m, sec.headerRowIdx);
@@ -724,59 +866,107 @@ export const GanttChart: React.FC<Props> = ({
       <div className="taskList" onClick={clearSelection}>
         <div className="ganttHeader" style={{ padding: 12, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
           <div>
-            <div className="label">Phase</div>
-            <select value={phaseFilter} onChange={(e) => setPhaseFilter(e.target.value)}>
-              <option value="">All phases</option>
-              {phases.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
+            <div className="label">{phaseSummary ? "Project" : "Phase"}</div>
+            {phaseSummary ? (
+              <select value={projectName.trim() ? "current" : ""} disabled>
+                <option value="">All projects</option>
+                {projectName.trim() ? <option value="current">{projectName.trim()}</option> : null}
+              </select>
+            ) : (
+              <select value={phaseFilter} onChange={(e) => setPhaseFilter(e.target.value)}>
+                <option value="">All phases</option>
+                {phases.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            )}
           </div>
           <div style={{ flex: 1 }} />
         </div>
 
         <div>
-          {groups.map(g => (
-            <div key={g.phase}>
-              <div
-                style={{
-                  height: rowHeight,
-                  padding: "0 12px",
-                  borderBottom: "1px solid var(--border)",
-                  background: "var(--gantt-phase-header)",
-                  fontWeight: 600,
-                  display: "flex",
-                  alignItems: "center",
-                }}
-              >
-                {g.phase}
-              </div>
-              {g.tasks.map(t => (
-                <div
-                  key={t.id}
-                  style={{
-                    padding: "8px 12px",
-                    borderBottom: "1px solid var(--border)",
-                    height: rowHeight,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    overflow: "hidden",
-                    cursor: "pointer",
-                    background: t.id === selectedId ? "var(--selected-row-bg)" : "transparent",
-                  }}
-                  title={t.details || t.name}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectTask(t.id);
-                  }}
-                >
-                  <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "var(--muted-2)" }}>
-                    {t.display_id || t.display_task_id || "—"}
-                  </span>
-                  <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
+          {phaseSummary
+            ? (
+                <>
+                  {/* Project header row (replaces Phase header) */}
+                  <div
+                    style={{
+                      height: rowHeight,
+                      padding: "0 12px",
+                      borderBottom: "1px solid var(--border)",
+                      background: "var(--gantt-phase-header)",
+                      fontWeight: 600,
+                      display: "flex",
+                      alignItems: "center",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                    title={projectName.trim() || "Project"}
+                  >
+                    {projectName.trim() || "Project"}
+                  </div>
+
+                  {/* Phase rows (replace Task rows) */}
+                  {phaseRows.map((ph) => (
+                    <div
+                      key={ph}
+                      style={{
+                        padding: "8px 12px",
+                        borderBottom: "1px solid var(--border)",
+                        height: rowHeight,
+                        display: "flex",
+                        alignItems: "center",
+                        overflow: "hidden",
+                      }}
+                      title={ph}
+                    >
+                      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ph}</span>
+                    </div>
+                  ))}
+                </>
+              )
+            : groups.map(g => (
+                <div key={g.phase}>
+                  <div
+                    style={{
+                      height: rowHeight,
+                      padding: "0 12px",
+                      borderBottom: "1px solid var(--border)",
+                      background: "var(--gantt-phase-header)",
+                      fontWeight: 600,
+                      display: "flex",
+                      alignItems: "center",
+                    }}
+                  >
+                    {g.phase}
+                  </div>
+                  {g.tasks.map(t => (
+                    <div
+                      key={t.id}
+                      style={{
+                        padding: "8px 12px",
+                        borderBottom: "1px solid var(--border)",
+                        height: rowHeight,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        overflow: "hidden",
+                        cursor: "pointer",
+                        background: t.id === selectedId ? "var(--selected-row-bg)" : "transparent",
+                      }}
+                      title={t.details || t.name}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectTask(t.id);
+                      }}
+                    >
+                      <span className="mono" style={{ width: 54, flex: "0 0 auto", color: "var(--muted-2)" }}>
+                        {t.display_id || t.display_task_id || "—"}
+                      </span>
+                      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
+                    </div>
+                  ))}
                 </div>
               ))}
-            </div>
-          ))}
         </div>
       </div>
 
@@ -793,7 +983,12 @@ export const GanttChart: React.FC<Props> = ({
             <div className="label" style={{ visibility: "hidden" }}>
               Search
             </div>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter tasks…" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={phaseSummary ? "Phase summary view" : "Filter tasks…"}
+              disabled={phaseSummary}
+            />
           </div>
         </div>
 
@@ -1159,15 +1354,21 @@ export const GanttChart: React.FC<Props> = ({
 
                 // Build alternating weekday colors, resetting per phase.
                 const fills: string[] = [];
-                let workdayIdx = 0;
-                for (let d = 0; d <= dayCount; d += 1) {
-                  const t = phaseBase + d * 24 * 60 * 60 * 1000;
-                  const dow = new Date(t).getUTCDay();
-                  const isWeekend = dow === 0 || dow === 6;
-                  if (isWeekend) fills.push("var(--gantt-weekend)");
-                  else {
-                    fills.push(workdayIdx % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
-                    workdayIdx += 1;
+                if (weeksMode) {
+                  for (let d = 0; d <= dayCount; d += 1) {
+                    fills.push(d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+                  }
+                } else {
+                  let workdayIdx = 0;
+                  for (let d = 0; d <= dayCount; d += 1) {
+                    const t = phaseBase + d * 24 * 60 * 60 * 1000;
+                    const dow = new Date(t).getUTCDay();
+                    const isWeekend = dow === 0 || dow === 6;
+                    if (isWeekend) fills.push("var(--gantt-weekend)");
+                    else {
+                      fills.push(workdayIdx % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+                      workdayIdx += 1;
+                    }
                   }
                 }
 
@@ -1199,21 +1400,25 @@ export const GanttChart: React.FC<Props> = ({
                       />
                     ))}
 
-                    {/* Per-phase axis labels on the phase header row */}
-                    {lineDays.map((d) => (
-                      <text
-                        key={`tick-${sec.phase}-${d}`}
-                        x={chartPadLeft + d * pxPerDay + 2}
-                        y={sec.headerRowIdx * rowHeight + 18}
-                        fontSize={11}
-                        fill="var(--gantt-axis)"
-                      >
-                        {formatTickForBase(phaseBase, d)}
-                      </text>
-                    ))}
+                    {/* Per-phase axis labels on the phase header row (skip in Phase Summary) */}
+                    {!phaseSummary
+                      ? lineDays.map((d) => (
+                          <text
+                            key={`tick-${sec.phase}-${d}`}
+                            x={chartPadLeft + d * pxPerDay + 2}
+                            y={sec.headerRowIdx * rowHeight + 18}
+                            fontSize={11}
+                            fill="var(--gantt-axis)"
+                          >
+                            {formatTickForBase(phaseBase, d)}
+                          </text>
+                        ))
+                      : null}
                   </g>
                 );
               })}
+
+              {/* Phase Summary: show date/counter inside the phase bubbles instead of a full-width axis row. */}
             </>
           )}
 
@@ -1221,7 +1426,63 @@ export const GanttChart: React.FC<Props> = ({
             <path key={p.key} d={p.d} fill="none" stroke="var(--gantt-dep)" strokeWidth={1} />
           ))}
 
-          {filtered.map(t => {
+          {weeksMode || (phaseSummary && phaseLayout === "stacked")
+            ? rowBubbles.map((b) => {
+                const y = b.rowIdx * rowHeight + 5;
+                const h = rowHeight - 10;
+                const selectedRow = selectedId ? rowIndexById.get(selectedId) : undefined;
+                const isSelectedRow = selectedRow === b.rowIdx;
+                const isCritical = showCriticalPath && b.isCritical;
+                const strokeColor = isSelectedRow ? "var(--gantt-selected)" : isCritical ? "var(--gantt-critical)" : "var(--text)";
+
+                const padL = Math.max(0, barPadPx);
+                const padR = Math.max(0, barPadPx);
+                const x = chartPadLeft + b.startX * pxPerDay + padL;
+                const w = Math.max(2, Math.max(6, (b.endX - b.startX) * pxPerDay) - padL - padR);
+                const d = barPath(x, y, w, h, true, true);
+
+                // In Phase Summary (stacked), show one date/counter inside each bubble.
+                let bubbleLabel: string | null = null;
+                if (phaseSummary && phaseLayout === "stacked" && b.startUtc != null) {
+                  const MS_DAY = 24 * 60 * 60 * 1000;
+                  const offDays = Math.max(0, Math.floor((b.startUtc - baseUtc) / MS_DAY));
+                  if (timeAxisMode === "calendar") {
+                    bubbleLabel = dateFmt.format(new Date(b.startUtc));
+                  } else if (timeAxisMode === "weeks") {
+                    bubbleLabel = String(Math.floor(offDays / 7));
+                  } else {
+                    bubbleLabel = String(offDays);
+                  }
+                  // If the bubble is too small, omit the label to avoid clutter.
+                  if (w < 32) bubbleLabel = null;
+                }
+
+                return (
+                  <g
+                    key={`bubble-${b.rowIdx}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      selectTask(b.repId);
+                    }}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
+                    {bubbleLabel ? (
+                      <text
+                        x={x + 8}
+                        y={y + h / 2 + 4}
+                        fontSize={11}
+                        fill="var(--text)"
+                        textAnchor="start"
+                        style={{ pointerEvents: "none" }}
+                      >
+                        {bubbleLabel}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              })
+            : renderTasks.map(t => {
             const span = drawSpanById.get(t.id);
             const segs = segmentsById.get(t.id) || [];
             const rowIdx = rowIndexById.get(t.id) ?? t.schedule.row;
@@ -1272,9 +1533,11 @@ export const GanttChart: React.FC<Props> = ({
                     return (
                       <>
                         <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
-                        <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="var(--text)" style={{ pointerEvents: "none" }}>
-                          {t.display_id || t.display_task_id || ""}
-                        </text>
+                        {!phaseSummary ? (
+                          <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="var(--text)" style={{ pointerEvents: "none" }}>
+                            {t.display_id || t.display_task_id || ""}
+                          </text>
+                        ) : null}
                       </>
                     );
                   })()
@@ -1298,15 +1561,17 @@ export const GanttChart: React.FC<Props> = ({
                       );
                     })}
                     {/* Label once, on the first segment */}
-                    <text
-                      x={chartPadLeft + segs[0].xDay * pxPerDay + (segs[0].roundLeft ? Math.max(0, barPadPx) : 0) + 8}
-                      y={y + h / 2 + 4}
-                      fontSize={11}
-                      fill="var(--text)"
-                      style={{ pointerEvents: "none" }}
-                    >
-                      {t.display_id || t.display_task_id || ""}
-                    </text>
+                    {!phaseSummary ? (
+                      <text
+                        x={chartPadLeft + segs[0].xDay * pxPerDay + (segs[0].roundLeft ? Math.max(0, barPadPx) : 0) + 8}
+                        y={y + h / 2 + 4}
+                        fontSize={11}
+                        fill="var(--text)"
+                        style={{ pointerEvents: "none" }}
+                      >
+                        {t.display_id || t.display_task_id || ""}
+                      </text>
+                    ) : null}
                   </>
                 )}
               </g>

@@ -60,7 +60,15 @@ export default function App() {
       return true;
     }
   });
-  const [timeAxisMode, setTimeAxisMode] = useState<"dayCount" | "calendar">("dayCount");
+  const [detailMode, setDetailMode] = useState<"all" | "phaseSummary">(() => {
+    try {
+      const raw = window.localStorage.getItem("kanlytics.view.detailMode");
+      return raw === "phaseSummary" ? "phaseSummary" : "all";
+    } catch {
+      return "all";
+    }
+  });
+  const [timeAxisMode, setTimeAxisMode] = useState<"dayCount" | "calendar" | "weeks">("dayCount");
   const [phaseLayout, setPhaseLayout] = useState<"linear" | "stacked">("stacked");
   const [barPadPx, setBarPadPx] = useState<number>(() => {
     try {
@@ -144,6 +152,14 @@ export default function App() {
       // ignore
     }
   }, [showCriticalPath]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("kanlytics.view.detailMode", detailMode);
+    } catch {
+      // ignore
+    }
+  }, [detailMode]);
 
   function showToast(kind: "success" | "error", text: string) {
     if (toastTimerRef.current) {
@@ -671,7 +687,7 @@ export default function App() {
                     <select value={pxPerDay} onChange={(e) => setPxPerDay(Number(e.target.value))}>
                       {[10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80].map((v) => (
                         <option key={v} value={v}>
-                          {v} px/day
+                          {v} px/{timeAxisMode === "weeks" ? "week" : "day"}
                         </option>
                       ))}
                     </select>
@@ -689,9 +705,18 @@ export default function App() {
                   </div>
 
                   <div>
+                    <div className="label">Detail</div>
+                    <select value={detailMode} onChange={(e) => setDetailMode(e.target.value as any)}>
+                      <option value="all">All tasks</option>
+                      <option value="phaseSummary">Phase summary</option>
+                    </select>
+                  </div>
+
+                  <div>
                     <div className="label">Time axis</div>
                     <select value={timeAxisMode} onChange={(e) => setTimeAxisMode(e.target.value as any)}>
                       <option value="dayCount">Days</option>
+                      <option value="weeks">Weeks</option>
                       <option value="calendar">Calendar dates</option>
                     </select>
                   </div>
@@ -906,6 +931,8 @@ export default function App() {
               timeAxisMode={timeAxisMode}
               phaseLayout={phaseLayout}
               barPadPx={barPadPx}
+              projectName={projectName}
+              detailMode={detailMode}
             />
           </div>
         )}
