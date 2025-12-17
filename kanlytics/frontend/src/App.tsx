@@ -29,14 +29,38 @@ export default function App() {
   const [viewOptionsOpen, setViewOptionsOpen] = useState<boolean>(true);
   const [fileName, setFileName] = useState<string>("");
   const [csvText, setCsvText] = useState<string>("");
+  const [projectName, setProjectName] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem("kanlytics.projectName") || "";
+    } catch {
+      return "";
+    }
+  });
   const [startDate, setStartDate] = useState<string>(todayISO());
   const [durationMode, setDurationMode] = useState<"wall" | "billable">("wall");
   const [workingDays, setWorkingDays] = useState<boolean>(false);
-  const [pxPerDay, setPxPerDay] = useState<number>(40);
+  const [pxPerDay, setPxPerDay] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem("kanlytics.view.pxPerDay");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? n : 40;
+    } catch {
+      return 40;
+    }
+  });
   const [showDeps, setShowDeps] = useState<boolean>(true);
   const [showDailyGrid, setShowDailyGrid] = useState<boolean>(false);
   const [timeAxisMode, setTimeAxisMode] = useState<"dayCount" | "calendar">("dayCount");
   const [phaseLayout, setPhaseLayout] = useState<"linear" | "stacked">("stacked");
+  const [barPadPx, setBarPadPx] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem("kanlytics.view.barPadPx");
+      const n = raw ? Number(raw) : NaN;
+      return Number.isFinite(n) ? n : 4;
+    } catch {
+      return 4;
+    }
+  });
 
   const [planId, setPlanId] = useState<string>("");
   const [layout, setLayout] = useState<GanttLayout | null>(null);
@@ -86,6 +110,22 @@ export default function App() {
       // ignore
     }
   }, [darkMode]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("kanlytics.view.pxPerDay", String(pxPerDay));
+    } catch {
+      // ignore
+    }
+  }, [pxPerDay]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("kanlytics.view.barPadPx", String(barPadPx));
+    } catch {
+      // ignore
+    }
+  }, [barPadPx]);
 
   function showToast(kind: "success" | "error", text: string) {
     if (toastTimerRef.current) {
@@ -182,6 +222,11 @@ export default function App() {
     } catch {
       // ignore
     }
+    try {
+      window.localStorage.setItem("kanlytics.projectName", projectName.trim());
+    } catch {
+      // ignore
+    }
 
     setBusy(true);
     setErr("");
@@ -189,7 +234,12 @@ export default function App() {
     resetGithubProgress();
     try {
       setGithubJobMessage("Starting export…");
-      const started = await startExportProject({ planId, projectUrl: url, issueRepo: issueRepo.trim() || undefined });
+      const started = await startExportProject({
+        planId,
+        projectUrl: url,
+        issueRepo: issueRepo.trim() || undefined,
+        projectName: projectName.trim() || undefined,
+      });
       setGithubJobId(started.job_id);
     } catch (e: any) {
       showToast("error", e?.message || String(e));
@@ -293,7 +343,7 @@ export default function App() {
     setMsg("");
 
     try {
-      const created = await createPlan(csvText);
+      const created = await createPlan(csvText, projectName.trim() || undefined);
       setPlanId(created.plan_id);
       // Replace template CSV with normalized/instantiated CSV (UUID Task IDs + remapped deps).
       if (created.normalized_csv_text && created.normalized_csv_text.trim().length > 0) {
@@ -517,6 +567,22 @@ export default function App() {
 
               {ganttSettingsOpen ? (
                 <div className="row">
+                  <div style={{ minWidth: 260 }}>
+                    <div className="label">Project name</div>
+                    <input
+                      value={projectName}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setProjectName(v);
+                        try {
+                          window.localStorage.setItem("kanlytics.projectName", v);
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      placeholder="e.g. Client – Plant – Station"
+                    />
+                  </div>
                   <div style={{ minWidth: 170 }}>
                     <div className="label">Project start date</div>
                     <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
@@ -588,6 +654,17 @@ export default function App() {
                       {[10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80].map((v) => (
                         <option key={v} value={v}>
                           {v} px/day
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="label">Task bar padding</div>
+                    <select value={barPadPx} onChange={(e) => setBarPadPx(Number(e.target.value))}>
+                      {[0, 1, 2, 3, 4, 6, 8, 10, 12].map((v) => (
+                        <option key={v} value={v}>
+                          {v}px
                         </option>
                       ))}
                     </select>
@@ -788,7 +865,9 @@ export default function App() {
 
       <div className="card">
         {!layout ? (
-          <div className="small">No layout yet. Set a source by loading a CSV in <b>Source</b>.</div>
+          <div className="small">
+            No project loaded yet. Use <b>Data</b> to import a CSV project or pull from GitHub to see the project view.
+          </div>
         ) : (
           <div className="ganttShell">
             <GanttChart
@@ -799,6 +878,7 @@ export default function App() {
               showDailyGrid={showDailyGrid}
               timeAxisMode={timeAxisMode}
               phaseLayout={phaseLayout}
+              barPadPx={barPadPx}
             />
           </div>
         )}

@@ -11,6 +11,7 @@ type Props = {
   showDailyGrid?: boolean;
   timeAxisMode?: "dayCount" | "calendar";
   phaseLayout?: "linear" | "stacked";
+  barPadPx?: number;
 };
 
 function groupByPhase(tasks: TaskItem[]) {
@@ -200,7 +201,8 @@ function buildDepPaths(
   xOffset: number,
   pxPerDay: number,
   rowHeight: number,
-  yOffset: number
+  yOffset: number,
+  barPadPx: number
 ) {
   const byId = new Map(tasks.map(t => [t.id, t]));
   const paths: { d: string; key: string }[] = [];
@@ -218,12 +220,12 @@ function buildDepPaths(
     if (!aEnds || !bEnds) continue;
 
     // Arrow start: end of dependency bar (ensure at least 1 day for milestones)
-    const ax = xOffset + aEnds.endXDay * pxPerDay;
+    const ax = Math.max(xOffset, xOffset + aEnds.endXDay * pxPerDay - barPadPx);
     const aRow = rowIndexById.get(a.id) ?? a.schedule.row;
     const ay = aRow * rowHeight + rowHeight / 2 + yOffset;
 
     // Arrow end: start of dependent bar
-    const bx = xOffset + bEnds.startXDay * pxPerDay;
+    const bx = Math.max(xOffset, xOffset + bEnds.startXDay * pxPerDay + barPadPx);
     const bRow = rowIndexById.get(b.id) ?? b.schedule.row;
     const by = bRow * rowHeight + rowHeight / 2 + yOffset;
 
@@ -263,6 +265,7 @@ export const GanttChart: React.FC<Props> = ({
   showDailyGrid = false,
   timeAxisMode = "dayCount",
   phaseLayout = "stacked",
+  barPadPx = 0,
 }) => {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [search, setSearch] = useState("");
@@ -550,7 +553,8 @@ export const GanttChart: React.FC<Props> = ({
             chartPadLeft,
             pxPerDay,
             rowHeight,
-            0
+            0,
+            barPadPx
           )
         : [],
     [
@@ -565,6 +569,7 @@ export const GanttChart: React.FC<Props> = ({
       pxPerDay,
       rowHeight,
       showDeps,
+      barPadPx,
     ]
   );
 
@@ -581,10 +586,19 @@ export const GanttChart: React.FC<Props> = ({
   const dateFmt = useMemo(() => new Intl.DateTimeFormat(undefined, { month: "2-digit", day: "2-digit" }), []);
 
   const formatTickForBase = useMemo(() => {
-    if (timeAxisMode !== "calendar") return (_base: number, d: number) => String(d);
+    const MS_DAY = 24 * 60 * 60 * 1000;
+    if (timeAxisMode !== "calendar") {
+      // In stacked layout each phase uses its own "base" (min start within that phase).
+      // For a global day counter, offset each phase by how many calendar days it starts
+      // after the overall project start (baseUtc).
+      return (base: number, d: number) => {
+        const offsetDays = Math.round((base - baseUtc) / MS_DAY);
+        return String(offsetDays + d);
+      };
+    }
     // Calendar axis: always add calendar days (do not "skip" weekends visually).
-    return (base: number, d: number) => dateFmt.format(new Date(base + d * 24 * 60 * 60 * 1000));
-  }, [timeAxisMode, dateFmt]);
+    return (base: number, d: number) => dateFmt.format(new Date(base + d * MS_DAY));
+  }, [timeAxisMode, dateFmt, baseUtc]);
 
   const formatTick = useMemo(() => (d: number) => formatTickForBase(baseUtc, d), [formatTickForBase, baseUtc]);
 
@@ -632,6 +646,13 @@ export const GanttChart: React.FC<Props> = ({
   const infoPanelInset = 20;
   const taskListWidth = 360;
   const headerHeight = 112;
+
+  const linearAxisRowIdx = useMemo(() => {
+    if (!phaseSections.length) return 0;
+    let m = phaseSections[0].headerRowIdx;
+    for (const sec of phaseSections) m = Math.min(m, sec.headerRowIdx);
+    return m;
+  }, [phaseSections]);
 
   const [panelBounds, setPanelBounds] = useState<{ left: number; right: number; top: number; bottom: number } | null>(
     null
@@ -751,19 +772,6 @@ export const GanttChart: React.FC<Props> = ({
             </div>
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter tasks…" />
           </div>
-          <div style={{ flex: 1 }} />
-          <svg width={svgWidth} height={28}>
-            {phaseLayout === "linear"
-              ? ticks.map(d => (
-                  <g key={d}>
-                    <line x1={chartPadLeft + d * pxPerDay} y1={0} x2={chartPadLeft + d * pxPerDay} y2={28} stroke="var(--gantt-grid)" />
-                    <text x={chartPadLeft + d * pxPerDay + 2} y={18} fontSize={11} fill="var(--gantt-axis)">
-                      {formatTick(d)}
-                    </text>
-                  </g>
-                ))
-              : null}
-          </svg>
         </div>
 
         {/* Centered, inset overlay panel fixed to viewport (does not scroll away). */}
@@ -846,10 +854,10 @@ export const GanttChart: React.FC<Props> = ({
                         };
 
                         const statusText = (() => {
-                          // Today we treat GitHub Status as a board column and we don't have a dedicated field yet.
-                          // Show a best-effort label, but keep the original phase visible separately.
-                          const ph = (selected.phase || "").trim();
+                          const st = (selected.status || "").trim();
+                          if (st) return st;
                           const known = new Set(["Backlog", "Planned", "In Progress", "In Review", "Done"]);
+                          const ph = (selected.phase || "").trim();
                           return known.has(ph) ? ph : "Backlog";
                         })();
 
@@ -1104,6 +1112,19 @@ export const GanttChart: React.FC<Props> = ({
                           stroke="var(--gantt-grid)"
                     />
                   ))}
+
+              {/* Global axis labels (rendered inside the chart, like stacked mode) */}
+              {(showDailyGrid ? Array.from({ length: dayCount + 1 }, (_, d) => d) : ticks).map((d) => (
+                <text
+                  key={`tick-linear-${d}`}
+                  x={chartPadLeft + d * pxPerDay + 2}
+                  y={linearAxisRowIdx * rowHeight + 18}
+                  fontSize={11}
+                  fill="var(--gantt-axis)"
+                >
+                  {formatTickForBase(baseUtc, d)}
+                </text>
+              ))}
             </>
           ) : (
             <>
@@ -1198,8 +1219,10 @@ export const GanttChart: React.FC<Props> = ({
                   (() => {
                     const xDay = span?.xDay ?? (t.schedule.x ?? 0);
                     const wDay = Math.max(1, span?.wDay ?? (t.schedule.w ?? 0));
-                    const x = chartPadLeft + xDay * pxPerDay;
-                    const w = Math.max(6, wDay * pxPerDay);
+                    const padL = Math.max(0, barPadPx);
+                    const padR = Math.max(0, barPadPx);
+                    const x = chartPadLeft + xDay * pxPerDay + padL;
+                    const w = Math.max(2, Math.max(6, wDay * pxPerDay) - padL - padR);
                     const d = barPath(x, y, w, h, true, true);
                     return (
                       <>
@@ -1213,8 +1236,10 @@ export const GanttChart: React.FC<Props> = ({
                 ) : (
                   <>
                     {segs.map((seg, idx) => {
-                      const x = chartPadLeft + seg.xDay * pxPerDay;
-                      const w = Math.max(6, seg.wDay * pxPerDay);
+                      const padL = seg.roundLeft ? Math.max(0, barPadPx) : 0;
+                      const padR = seg.roundRight ? Math.max(0, barPadPx) : 0;
+                      const x = chartPadLeft + seg.xDay * pxPerDay + padL;
+                      const w = Math.max(2, Math.max(6, seg.wDay * pxPerDay) - padL - padR);
                       const d = barPath(x, y, w, h, seg.roundLeft, seg.roundRight);
                       return (
                         <path
@@ -1229,7 +1254,7 @@ export const GanttChart: React.FC<Props> = ({
                     })}
                     {/* Label once, on the first segment */}
                     <text
-                      x={chartPadLeft + segs[0].xDay * pxPerDay + 8}
+                      x={chartPadLeft + segs[0].xDay * pxPerDay + (segs[0].roundLeft ? Math.max(0, barPadPx) : 0) + 8}
                       y={y + h / 2 + 4}
                       fontSize={11}
                       fill="var(--text)"

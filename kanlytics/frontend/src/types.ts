@@ -25,6 +25,7 @@ export type TaskItem = {
   labels?: string[];
   assignees?: string[];
   phase: string;
+  status?: string | null;
   name: string;
   title?: string;
   details?: string;

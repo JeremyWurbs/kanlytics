@@ -23,8 +23,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function createPlan(csvText: string): Promise<CreatePlanResponse> {
-  return postJson<CreatePlanResponse>("gantt.create_plan", { csv_text: csvText });
+export async function createPlan(csvText: string, projectName?: string): Promise<CreatePlanResponse> {
+  return postJson<CreatePlanResponse>("gantt.create_plan", { csv_text: csvText, project_name: projectName });
 }
 
 export async function schedulePlan(params: {
@@ -60,11 +60,12 @@ export async function startConnectProject(projectUrl: string): Promise<StartJobR
   return postJson<StartJobResponse>("github.connect_project_start", { project_url: projectUrl });
 }
 
-export async function startExportProject(params: { planId: string; projectUrl: string; issueRepo?: string }): Promise<StartJobResponse> {
+export async function startExportProject(params: { planId: string; projectUrl: string; issueRepo?: string; projectName?: string }): Promise<StartJobResponse> {
   return postJson<StartJobResponse>("github.export_project_start", {
     plan_id: params.planId,
     project_url: params.projectUrl,
     issue_repo: params.issueRepo,
+    project_name: params.projectName,
   });
 }
 

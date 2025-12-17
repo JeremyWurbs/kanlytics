@@ -40,6 +40,9 @@
 }
 
 :root[data-theme="dark"] {
+  /* Hint to the browser to use dark native form controls (incl. date picker) */
+  color-scheme: dark;
+
   --bg: #0b1220;
   --card: #0f172a;
   --text: #e2e8f0;
@@ -95,6 +98,18 @@ input[type="text"], input:not([type]), input[type="date"], select {
   background: var(--input-bg);
   color: var(--text);
   line-height: 22px;
+}
+
+/* Make the date picker icon visible in dark mode (WebKit-based browsers) */
+:root[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator {
+  /* Some browsers keep the icon black unless forced harder */
+  filter: invert(1) brightness(1.35) contrast(1.1);
+  opacity: 0.95;
+}
+
+/* Also hint at the control level (helps some Chrome/Safari builds) */
+:root[data-theme="dark"] input[type="date"] {
+  color-scheme: dark;
 }
 input[type="text"]::placeholder,
 input:not([type])::placeholder {
