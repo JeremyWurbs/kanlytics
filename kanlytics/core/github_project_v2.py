@@ -154,6 +154,7 @@ class GitHubProjectV2:
         }
 
         self.project_id = self._resolve_project_id()
+        self._label_cache_by_repo: Dict[Tuple[str, str], set[str]] = {}
 
     def _graphql(self, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         res = requests.post(GITHUB_GRAPHQL_URL, headers=self._headers, json={"query": query, "variables": variables})
@@ -689,6 +690,95 @@ class GitHubProjectV2:
         if not url:
             raise ValueError("Issue creation succeeded but no html_url returned")
         return url
+
+    def _list_labels_rest(self, *, owner: str, repo: str) -> set[str]:
+        """
+        Return existing label names for a repo (cached).
+        """
+        key = (owner, repo)
+        if key in self._label_cache_by_repo:
+            return set(self._label_cache_by_repo[key])
+
+        labels: set[str] = set()
+        page = 1
+        while True:
+            api = f"https://api.github.com/repos/{owner}/{repo}/labels"
+            res = requests.get(api, headers=self._headers, params={"per_page": 100, "page": page})
+            res.raise_for_status()
+            data = res.json()
+            if not isinstance(data, list) or not data:
+                break
+            for item in data:
+                if isinstance(item, dict):
+                    name = (item.get("name") or "").strip()
+                    if name:
+                        labels.add(name.lower())
+            page += 1
+
+        self._label_cache_by_repo[key] = set(labels)
+        return set(labels)
+
+    @staticmethod
+    def _label_color_hex(name: str) -> str:
+        """
+        Deterministic label color from name.
+        """
+        import hashlib
+
+        h = hashlib.sha1(name.encode("utf-8")).hexdigest()
+        return h[:6]
+
+    def _create_label_rest(self, *, owner: str, repo: str, name: str) -> None:
+        api = f"https://api.github.com/repos/{owner}/{repo}/labels"
+        payload: Dict[str, Any] = {
+            "name": name,
+            "color": self._label_color_hex(name),
+            "description": "",
+        }
+        res = requests.post(api, headers=self._headers, json=payload)
+        # If it already exists, GitHub returns 422. Treat as success.
+        if res.status_code == 422:
+            return
+        res.raise_for_status()
+
+    def ensure_labels_exist(self, *, repo: str, labels: List[str]) -> List[str]:
+        """
+        Best-effort: create missing labels in the target repo and return the list of labels
+        that should be safe to apply to issues.
+        """
+        if not labels:
+            return []
+        owner, name = parse_repo_ref(repo)
+        existing = self._list_labels_rest(owner=owner, repo=name)
+
+        # Create any missing labels (case-insensitive)
+        for lbl in labels:
+            nm = (lbl or "").strip()
+            if not nm:
+                continue
+            if nm.lower() in existing:
+                continue
+            try:
+                self._create_label_rest(owner=owner, repo=name, name=nm)
+                existing.add(nm.lower())
+            except Exception:
+                # If label creation fails (permissions), we'll just avoid sending it.
+                continue
+
+        # Only return labels that now exist (case-insensitive match).
+        out: List[str] = []
+        seen: set[str] = set()
+        for lbl in labels:
+            nm = (lbl or "").strip()
+            if not nm:
+                continue
+            key = nm.lower()
+            if key in existing and key not in seen:
+                out.append(nm)
+                seen.add(key)
+        # refresh cache
+        self._label_cache_by_repo[(owner, name)] = set(existing)
+        return out
 
 
 def new_uuid() -> str:

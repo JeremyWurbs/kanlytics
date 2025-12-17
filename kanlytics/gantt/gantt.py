@@ -171,7 +171,9 @@ class Gantt:
                     **{
                         "Display Task ID": display_id,
                         "Task ID": task_id,
+                        "project_name": get(r, "project_name") or get(r, "Project Name"),
                         "phase": get(r, "phase"),
+                        "status": get(r, "status") or get(r, "Status") or None,
                         "title": get(r, "title"),
                         "body": get(r, "body"),
                         "milestone_or_output": get(r, "milestone_or_output"),
@@ -389,13 +391,32 @@ class Gantt:
                 dep_end = max(scheduled[d].end for d in t.dependencies)
                 est = self._add_days(dep_end, 1, working_days=working_days, weekmask=weekmask)
 
-            # If duration is 0, end == start - 1 is awkward; we make end == start (zero-length bar).
-            if duration_days <= 0:
-                task_start = est
-                task_end = est
+            # If a task has an explicit planned window, we treat it as informational/derived by default
+            # (e.g., pulled back from GitHub Project fields). To keep scheduling reactive to
+            # working-days/weekend settings, we only use planned windows as constraints when the
+            # task has no meaningful duration estimate (duration_days == 0).
+            planned_start: Optional[date] = t.start_date if duration_days == 0 else None
+            planned_end: Optional[date] = t.end_date if duration_days == 0 else None
+
+            planned_duration_days: Optional[int] = None
+            if planned_start and planned_end and planned_end >= planned_start:
+                planned_duration_days = self._count_days_inclusive(planned_start, planned_end, working_days=working_days, weekmask=weekmask)
+                duration_days = max(duration_days, planned_duration_days)
+
+            # Apply start constraint (cannot violate dependencies).
+            task_start = max(est, planned_start) if planned_start else est
+
+            # Prefer honoring a concrete planned end when we can.
+            if planned_start and planned_end and task_start == planned_start:
+                task_end = planned_end
+                # keep duration consistent with displayed range
+                duration_days = self._count_days_inclusive(task_start, task_end, working_days=working_days, weekmask=weekmask)
             else:
-                task_start = est
-                task_end = self._add_days(task_start, duration_days - 1, working_days=working_days, weekmask=weekmask)
+                # If duration is 0, end == start - 1 is awkward; we make end == start (zero-length bar).
+                if duration_days <= 0:
+                    task_end = task_start
+                else:
+                    task_end = self._add_days(task_start, duration_days - 1, working_days=working_days, weekmask=weekmask)
 
             offset = self._days_between(start, task_start, working_days=working_days, weekmask=weekmask)
 
@@ -453,6 +474,7 @@ class Gantt:
                     "labels": list(t.labels or []),
                     "assignees": list(t.assignees or []),
                     "phase": t.phase,
+                    "status": getattr(t, "status", None),
                     "name": t.name or t.title,
                     "title": t.title,
                     "details": t.details,
@@ -583,6 +605,7 @@ class Gantt:
             "url",
             "number",
             "state",
+            "project_name",
             "phase",
             "title",
             "body",
@@ -611,6 +634,7 @@ class Gantt:
                     "url": t.url or "",
                     "number": "" if t.number is None else str(t.number),
                     "state": t.state or "",
+                    "project_name": getattr(t, "project_name", "") or "",
                     "phase": t.phase or "",
                     "title": t.title or t.name or "",
                     "body": t.body or t.details or "",
@@ -624,7 +648,7 @@ class Gantt:
                     "Labels": ",".join(t.labels or []),
                     "Assignees": ",".join(t.assignees or []),
                     "notes": t.notes or "",
-                    "status": "",
+                    "status": (getattr(t, "status", None) or ""),
                 }
             )
 
@@ -647,8 +671,8 @@ class Gantt:
                 indeg[t.id] += 1
 
         queue: List[str] = [tid for tid, deg in indeg.items() if deg == 0]
-        # Stable ordering: sort by numeric-ish Task ID segments (best effort)
-        queue.sort(key=self._sort_key_task_id)
+        # Stable ordering: prefer Display Task ID / issue number over UUID.
+        queue.sort(key=self._sort_key_for_node)
 
         order: List[str] = []
         while queue:
@@ -658,7 +682,7 @@ class Gantt:
                 indeg[m] -= 1
                 if indeg[m] == 0:
                     queue.append(m)
-                    queue.sort(key=self._sort_key_task_id)
+                    queue.sort(key=self._sort_key_for_node)
 
         if len(order) != len(self._tasks):
             # Find a cycle hint
@@ -667,10 +691,14 @@ class Gantt:
 
         return order
 
-    @staticmethod
-    def _sort_key_task_id(task_id: str) -> Tuple:
-        # Split "2.10" into (2,10) where possible, otherwise fallback string
-        parts = task_id.split(".")
+    def _sort_key_for_node(self, task_id: str) -> Tuple:
+        t = self._task_by_id.get(task_id)
+        s = ""
+        if t is not None:
+            s = (t.display_task_id or (str(t.number) if t.number is not None else "")).strip()
+        if not s:
+            s = task_id
+        parts = s.split(".")
         key: List[Any] = []
         for p in parts:
             if p.isdigit():
@@ -678,6 +706,26 @@ class Gantt:
             else:
                 key.append(p)
         return tuple(key)
+
+    @staticmethod
+    def _count_days_inclusive(
+        start: date,
+        end: date,
+        *,
+        working_days: bool,
+        weekmask: Tuple[int, ...],
+    ) -> int:
+        if end < start:
+            return 0
+        if not working_days:
+            return (end - start).days + 1
+        cur = start
+        count = 0
+        while cur <= end:
+            if cur.weekday() in weekmask:
+                count += 1
+            cur = cur + timedelta(days=1)
+        return count
 
     # -----------------------------
     # Date helpers

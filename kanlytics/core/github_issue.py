@@ -86,6 +86,18 @@ class GitHubIssue(BaseModel):
     # -----------------------------
     # Gantt/task planning fields
     # -----------------------------
+    status: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("status", "Status"),
+        serialization_alias="status",
+        description="Board/status column (e.g. Backlog/Planned/In Progress/In Review/Done). Stored separately from phase.",
+    )
+    project_name: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("project_name", "Project Name"),
+        serialization_alias="project_name",
+        description="Optional project identifier to group tasks across multiple plans/boards.",
+    )
     phase: str = Field(default="", description="Grouping bucket (e.g., release/milestone/phase).")
     name: str = Field(default="", description="Task name (synced with title).")
     details: str = Field(default="", description="Task details (synced with body).")

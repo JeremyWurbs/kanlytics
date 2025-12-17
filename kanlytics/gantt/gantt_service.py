@@ -38,6 +38,10 @@ class CreatePlanInput(BaseModel):
         ...,
         description="Full CSV file contents as UTF-8 text (V2 single-header template format).",
     )
+    project_name: Optional[str] = Field(
+        default=None,
+        description="Optional project name to stamp into tasks/CSV for future multi-project support.",
+    )
 
 
 class CreatePlanOutput(BaseModel):
@@ -88,6 +92,10 @@ class ExportProjectInput(BaseModel):
     issue_repo: Optional[str] = Field(
         default=None,
         description="Optional target repo ('owner/repo' or https://github.com/owner/repo) for creating missing issues.",
+    )
+    project_name: Optional[str] = Field(
+        default=None,
+        description="Optional project name to write to a ProjectV2 text field for each item.",
     )
 
 
@@ -239,6 +247,12 @@ class GanttService(Service):
         Parse CSV text into a Gantt plan and store it server-side.
         """
         gantt = self._gantt_from_csv_text(payload.csv_text)
+        if payload.project_name:
+            pn = payload.project_name.strip()
+            if pn:
+                for t in gantt.tasks:
+                    if not getattr(t, "project_name", None):
+                        t.project_name = pn
 
         plan_id = str(uuid4())
         with self._lock:
@@ -329,7 +343,22 @@ class GanttService(Service):
                 client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
 
             status = client._get_single_select_value(item, "Status") or ""
-            phase = status or "Backlog"
+            phase = client._get_text_field_value(item, "Phase") or ""
+            deps_raw = client._get_text_field_value(item, "Dependencies") or ""
+            display_id = client._get_text_field_value(item, "Display Task ID")
+            wall_days_raw = client._get_text_field_value(item, "Wall Days") or ""
+            billable_days_raw = client._get_text_field_value(item, "Billable Days") or ""
+            project_name = client._get_text_field_value(item, "Project Name")
+            start_date = client._get_date_field_value(item, "Start Date")
+            end_date = client._get_date_field_value(item, "End Date")
+
+            def _to_float(s: str, default: float) -> float:
+                try:
+                    return float(str(s).strip())
+                except Exception:
+                    return default
+
+            deps = [d.strip() for d in deps_raw.split(",") if d.strip()]
 
             if typename == "Issue":
                 labels = [n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if (n or {}).get("name")]
@@ -338,7 +367,7 @@ class GanttService(Service):
                 issue = GitHubIssue(
                     task_id=task_id,
                     id=task_id,
-                    display_task_id=str(number) if isinstance(number, int) else None,
+                    display_task_id=(display_id or (str(number) if isinstance(number, int) else None)),
                     number=number if isinstance(number, int) else None,
                     title=content.get("title") or "",
                     body=content.get("body") or "",
@@ -350,8 +379,13 @@ class GanttService(Service):
                     labels=[l for l in labels if l],
                     assignees=[a for a in assignees if a],
                     phase=phase,
-                    wall_days=1.0,
-                    billable_days=1.0,
+                    status=(status or "Backlog"),
+                    Dependencies=",".join(deps),
+                    wall_days=_to_float(wall_days_raw, 1.0),
+                    billable_days=_to_float(billable_days_raw, 1.0),
+                    project_name=project_name,
+                    start_date=start_date,
+                    end_date=end_date,
                 )
             else:
                 issue = GitHubIssue(
@@ -363,8 +397,13 @@ class GanttService(Service):
                     created_at=content.get("createdAt"),
                     updated_at=content.get("updatedAt"),
                     phase=phase,
-                    wall_days=1.0,
-                    billable_days=1.0,
+                    status=(status or "Backlog"),
+                    Dependencies=",".join(deps),
+                    wall_days=_to_float(wall_days_raw, 1.0),
+                    billable_days=_to_float(billable_days_raw, 1.0),
+                    project_name=project_name,
+                    start_date=start_date,
+                    end_date=end_date,
                 )
 
             tasks.append(issue)
@@ -412,7 +451,22 @@ class GanttService(Service):
                         client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
 
                     status_val = client._get_single_select_value(item, "Status") or ""
-                    phase = status_val or "Backlog"
+                    phase = client._get_text_field_value(item, "Phase") or ""
+                    deps_raw = client._get_text_field_value(item, "Dependencies") or ""
+                    display_id = client._get_text_field_value(item, "Display Task ID")
+                    wall_days_raw = client._get_text_field_value(item, "Wall Days") or ""
+                    billable_days_raw = client._get_text_field_value(item, "Billable Days") or ""
+                    project_name = client._get_text_field_value(item, "Project Name")
+                    start_date = client._get_date_field_value(item, "Start Date")
+                    end_date = client._get_date_field_value(item, "End Date")
+
+                    def _to_float(s: str, default: float) -> float:
+                        try:
+                            return float(str(s).strip())
+                        except Exception:
+                            return default
+
+                    deps = [d.strip() for d in deps_raw.split(",") if d.strip()]
 
                     if typename == "Issue":
                         labels = [n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if (n or {}).get("name")]
@@ -421,7 +475,7 @@ class GanttService(Service):
                         issue = GitHubIssue(
                             task_id=task_id,
                             id=task_id,
-                            display_task_id=str(number) if isinstance(number, int) else None,
+                            display_task_id=(display_id or (str(number) if isinstance(number, int) else None)),
                             number=number if isinstance(number, int) else None,
                             title=content.get("title") or "",
                             body=content.get("body") or "",
@@ -433,8 +487,13 @@ class GanttService(Service):
                             labels=[l for l in labels if l],
                             assignees=[a for a in assignees if a],
                             phase=phase,
-                            wall_days=1.0,
-                            billable_days=1.0,
+                            status=(status_val or "Backlog"),
+                            Dependencies=",".join(deps),
+                            wall_days=_to_float(wall_days_raw, 1.0),
+                            billable_days=_to_float(billable_days_raw, 1.0),
+                            project_name=project_name,
+                            start_date=start_date,
+                            end_date=end_date,
                         )
                     else:
                         issue = GitHubIssue(
@@ -446,8 +505,13 @@ class GanttService(Service):
                             created_at=content.get("createdAt"),
                             updated_at=content.get("updatedAt"),
                             phase=phase,
-                            wall_days=1.0,
-                            billable_days=1.0,
+                            status=(status_val or "Backlog"),
+                            Dependencies=",".join(deps),
+                            wall_days=_to_float(wall_days_raw, 1.0),
+                            billable_days=_to_float(billable_days_raw, 1.0),
+                            project_name=project_name,
+                            start_date=start_date,
+                            end_date=end_date,
                         )
 
                     tasks.append(issue)
@@ -499,8 +563,14 @@ class GanttService(Service):
         client = GitHubProjectV2(payload.project_url)
         status_field_id, status_option_ids = client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
         task_id_field_id = client.ensure_text_field("Task ID")
+        display_id_field_id = client.ensure_text_field("Display Task ID")
+        phase_field_id = client.ensure_text_field("Phase")
+        deps_field_id = client.ensure_text_field("Dependencies")
+        wall_days_field_id = client.ensure_text_field("Wall Days")
+        billable_days_field_id = client.ensure_text_field("Billable Days")
         start_date_field_id = client.ensure_date_field("Start Date")
         end_date_field_id = client.ensure_date_field("End Date")
+        project_name_field_id = client.ensure_text_field("Project Name")
 
         by_task_id: dict[str, dict[str, Any]] = {}
         by_issue_url: dict[str, dict[str, Any]] = {}
@@ -543,13 +613,25 @@ class GanttService(Service):
             rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
 
             try:
-                desired_status = t.phase if (t.phase or "").strip() in status_option_ids else "Backlog"
+                desired_status = (getattr(t, "status", None) or "").strip() or "Backlog"
+                if desired_status not in status_option_ids:
+                    desired_status = "Backlog"
                 sch = schedule_by_id.get(t.id) or {}
                 sch_start = sch.get("start")
                 sch_end = sch.get("end")
+                project_name_value = (payload.project_name or getattr(t, "project_name", None) or "").strip()
                 if rec:
                     # Ensure field is set (idempotent).
                     client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
+                    if project_name_field_id:
+                        if project_name_value:
+                            client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
+                    if getattr(t, "display_task_id", None):
+                        client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=str(t.display_task_id))
+                    client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=(t.phase or ""))
+                    client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text=",".join(t.dependencies or []))
+                    client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                    client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text=str(t.billable_days or 0))
                     client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
                     if sch_start:
                         client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=sch_start)
@@ -559,7 +641,15 @@ class GanttService(Service):
                     if rec["type"] == "Issue":
                         issue_url = t.url or rec.get("issue_url")
                         if issue_url:
-                            client.update_issue_rest(issue_url=issue_url, title=title or "(untitled)", body=body, labels=labels, assignees=assignees)
+                            owner, repo, _ = client.parse_issue_url(issue_url)
+                            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
+                            client.update_issue_rest(
+                                issue_url=issue_url,
+                                title=title or "(untitled)",
+                                body=body,
+                                labels=labels_safe,
+                                assignees=assignees,
+                            )
                             out.updated_issues += 1
                     else:
                         draft_id = rec.get("draft_issue_id")
@@ -573,6 +663,15 @@ class GanttService(Service):
                         issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
                         item_id = client.add_issue_item(issue_node_id=issue_node_id)
                         client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        if project_name_field_id:
+                            if project_name_value:
+                                client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                        if getattr(t, "display_task_id", None):
+                            client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
+                        client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
+                        client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
+                        client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                        client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
                         client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
                         if sch_start:
                             client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
@@ -580,21 +679,38 @@ class GanttService(Service):
                             client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
                         out.added_existing_issues += 1
                         # best-effort update to match local fields
-                        client.update_issue_rest(issue_url=t.url, title=title or "(untitled)", body=body, labels=labels, assignees=assignees)
+                        labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
+                        client.update_issue_rest(
+                            issue_url=t.url,
+                            title=title or "(untitled)",
+                            body=body,
+                            labels=labels_safe,
+                            assignees=assignees,
+                        )
                         out.updated_issues += 1
                     elif issue_repo:
                         # Create a real repo issue, add to project, then update fields.
+                        labels_safe = client.ensure_labels_exist(repo=issue_repo, labels=labels)
                         created_url = client.create_issue_rest(
                             repo=issue_repo,
                             title=title or "(untitled)",
                             body=body,
-                            labels=labels,
+                            labels=labels_safe,
                             assignees=assignees,
                         )
                         owner, repo, number = client.parse_issue_url(created_url)
                         issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
                         item_id = client.add_issue_item(issue_node_id=issue_node_id)
                         client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        if project_name_field_id:
+                            if project_name_value:
+                                client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                        if getattr(t, "display_task_id", None):
+                            client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
+                        client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
+                        client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
+                        client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                        client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
                         client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
                         if sch_start:
                             client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
@@ -605,6 +721,15 @@ class GanttService(Service):
                     else:
                         item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
                         client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        if project_name_field_id:
+                            if project_name_value:
+                                client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                        if getattr(t, "display_task_id", None):
+                            client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
+                        client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
+                        client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
+                        client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                        client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
                         client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
                         if sch_start:
                             client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
@@ -652,6 +777,12 @@ class GanttService(Service):
                 task_id_field_id = client.ensure_text_field("Task ID")
                 start_date_field_id = client.ensure_date_field("Start Date")
                 end_date_field_id = client.ensure_date_field("End Date")
+                display_id_field_id = client.ensure_text_field("Display Task ID")
+                phase_field_id = client.ensure_text_field("Phase")
+                deps_field_id = client.ensure_text_field("Dependencies")
+                wall_days_field_id = client.ensure_text_field("Wall Days")
+                billable_days_field_id = client.ensure_text_field("Billable Days")
+                project_name_field_id = client.ensure_text_field("Project Name")
 
                 self._job_update(job_id, progress=12, message="Loading existing project items…")
                 items = list(client.iter_items())
@@ -697,12 +828,24 @@ class GanttService(Service):
                     rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
 
                     try:
-                        desired_status = t.phase if (t.phase or "").strip() in status_option_ids else "Backlog"
+                        desired_status = (getattr(t, "status", None) or "").strip() or "Backlog"
+                        if desired_status not in status_option_ids:
+                            desired_status = "Backlog"
                         sch = schedule_by_id.get(t.id) or {}
                         sch_start = sch.get("start")
                         sch_end = sch.get("end")
+                        project_name_value = (payload.project_name or getattr(t, "project_name", None) or "").strip()
                         if rec:
                             client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
+                            if project_name_field_id:
+                                if project_name_value:
+                                    client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
+                            if getattr(t, "display_task_id", None):
+                                client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=str(t.display_task_id))
+                            client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=(t.phase or ""))
+                            client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text=",".join(t.dependencies or []))
+                            client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                            client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text=str(t.billable_days or 0))
                             client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
                             if sch_start:
                                 client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=sch_start)
@@ -712,11 +855,13 @@ class GanttService(Service):
                             if rec["type"] == "Issue":
                                 issue_url = t.url or rec.get("issue_url")
                                 if issue_url:
+                                    owner, repo, _ = client.parse_issue_url(issue_url)
+                                    labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
                                     client.update_issue_rest(
                                         issue_url=issue_url,
                                         title=title or "(untitled)",
                                         body=body,
-                                        labels=labels,
+                                        labels=labels_safe,
                                         assignees=assignees,
                                     )
                                     out.updated_issues += 1
@@ -731,33 +876,51 @@ class GanttService(Service):
                                 issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
                                 item_id = client.add_issue_item(issue_node_id=issue_node_id)
                                 client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                if project_name_field_id and project_name_value:
+                                    client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                                if getattr(t, "display_task_id", None):
+                                    client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
+                                client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
+                                client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
+                                client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                                client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
                                 client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
                                 if sch_start:
                                     client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
                                 if sch_end:
                                     client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
                                 out.added_existing_issues += 1
+                                labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
                                 client.update_issue_rest(
                                     issue_url=t.url,
                                     title=title or "(untitled)",
                                     body=body,
-                                    labels=labels,
+                                    labels=labels_safe,
                                     assignees=assignees,
                                 )
                                 out.updated_issues += 1
                             else:
                                 if issue_repo:
+                                    labels_safe = client.ensure_labels_exist(repo=issue_repo, labels=labels)
                                     created_url = client.create_issue_rest(
                                         repo=issue_repo,
                                         title=title or "(untitled)",
                                         body=body,
-                                        labels=labels,
+                                        labels=labels_safe,
                                         assignees=assignees,
                                     )
                                     owner, repo, number = client.parse_issue_url(created_url)
                                     issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
                                     item_id = client.add_issue_item(issue_node_id=issue_node_id)
                                     client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                    if project_name_field_id and project_name_value:
+                                        client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                                    if getattr(t, "display_task_id", None):
+                                        client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
+                                    client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
+                                    client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
+                                    client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                                    client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
                                     client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
                                     if sch_start:
                                         client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
@@ -768,6 +931,14 @@ class GanttService(Service):
                                 else:
                                     item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
                                     client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                    if project_name_field_id and project_name_value:
+                                        client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                                    if getattr(t, "display_task_id", None):
+                                        client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
+                                    client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
+                                    client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
+                                    client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
+                                    client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
                                     client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
                                     if sch_start:
                                         client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
