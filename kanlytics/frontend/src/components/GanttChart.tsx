@@ -9,6 +9,7 @@ type Props = {
   rowHeight?: number;
   showDeps?: boolean;
   showDailyGrid?: boolean;
+  showCriticalPath?: boolean;
   timeAxisMode?: "dayCount" | "calendar";
   phaseLayout?: "linear" | "stacked";
   barPadPx?: number;
@@ -220,12 +221,16 @@ function buildDepPaths(
     if (!aEnds || !bEnds) continue;
 
     // Arrow start: end of dependency bar (ensure at least 1 day for milestones)
-    const ax = Math.max(xOffset, xOffset + aEnds.endXDay * pxPerDay - barPadPx);
+    const aIsMilestone = Math.abs(aEnds.endXDay - aEnds.startXDay) < 1e-9;
+    const axRaw = xOffset + aEnds.endXDay * pxPerDay;
+    const ax = aIsMilestone ? axRaw : Math.max(xOffset, axRaw - barPadPx);
     const aRow = rowIndexById.get(a.id) ?? a.schedule.row;
     const ay = aRow * rowHeight + rowHeight / 2 + yOffset;
 
     // Arrow end: start of dependent bar
-    const bx = Math.max(xOffset, xOffset + bEnds.startXDay * pxPerDay + barPadPx);
+    const bIsMilestone = Math.abs(bEnds.endXDay - bEnds.startXDay) < 1e-9;
+    const bxRaw = xOffset + bEnds.startXDay * pxPerDay;
+    const bx = bIsMilestone ? bxRaw : Math.max(xOffset, bxRaw + barPadPx);
     const bRow = rowIndexById.get(b.id) ?? b.schedule.row;
     const by = bRow * rowHeight + rowHeight / 2 + yOffset;
 
@@ -263,6 +268,7 @@ export const GanttChart: React.FC<Props> = ({
   rowHeight = 28,
   showDeps = true,
   showDailyGrid = false,
+  showCriticalPath = true,
   timeAxisMode = "dayCount",
   phaseLayout = "stacked",
   barPadPx = 0,
@@ -336,7 +342,11 @@ export const GanttChart: React.FC<Props> = ({
         continue;
       }
       const xDay = Math.max(0, Math.floor((startUtc - baseUtc) / (24 * 60 * 60 * 1000)));
-      const wDay = Math.max(0, Math.floor((endUtc - startUtc) / (24 * 60 * 60 * 1000)) + 1); // inclusive end
+      // Normally we use inclusive calendar-day span (end-start+1) so working-days schedules
+      // can show weekend gaps. However, true milestones have schedule.w === 0 and should
+      // render as a point (diamond) and not consume a day.
+      const wDay =
+        (t.schedule.w ?? 0) === 0 ? 0 : Math.max(0, Math.floor((endUtc - startUtc) / (24 * 60 * 60 * 1000)) + 1); // inclusive end
       m.set(t.id, { xDay, wDay });
     }
     return m;
@@ -403,11 +413,17 @@ export const GanttChart: React.FC<Props> = ({
       const span = drawSpanById.get(t.id);
       if (!span) continue;
 
+      // Milestones: render as diamonds elsewhere; no segments.
+      if (span.wDay === 0) {
+        m.set(t.id, []);
+        continue;
+      }
+
       const ph = t.phase || "Unphased";
       const phaseBase = phaseLayout === "stacked" ? (baseUtcByPhase.get(ph) ?? baseUtc) : baseUtc;
 
       const startDay = span.xDay;
-      const totalDays = Math.max(1, span.wDay); // render milestones as 1-day visual
+      const totalDays = Math.max(1, span.wDay);
       const endDay = startDay + totalDays - 1;
 
       if (!splitOnWeekends) {
@@ -459,6 +475,13 @@ export const GanttChart: React.FC<Props> = ({
       const segs = segmentsById.get(t.id) || [];
       const span = drawSpanById.get(t.id);
       if (!span) continue;
+
+      if (span.wDay === 0) {
+        // Milestone point: center of the day cell.
+        const p = span.xDay + 0.5;
+        m.set(t.id, { startXDay: p, endXDay: p });
+        continue;
+      }
 
       if (segs.length === 0) {
         const startXDay = span.xDay;
@@ -1206,6 +1229,9 @@ export const GanttChart: React.FC<Props> = ({
             const h = rowHeight - 10;
             const labelRendered = false;
             const isSelected = t.id === selectedId;
+            const isMilestone = (span?.wDay ?? 0) === 0;
+            const isCritical = showCriticalPath && (t.is_critical || (t.slack_days ?? 0) === 0);
+            const strokeColor = isSelected ? "var(--gantt-selected)" : isCritical ? "var(--gantt-critical)" : "var(--text)";
             return (
               <g
                 key={t.id}
@@ -1215,7 +1241,26 @@ export const GanttChart: React.FC<Props> = ({
                 }}
                 style={{ cursor: "pointer" }}
               >
-                {segs.length === 0 ? (
+                {isMilestone ? (
+                  (() => {
+                    const xDay = span?.xDay ?? (t.schedule.x ?? 0);
+                    const cx = chartPadLeft + xDay * pxPerDay + pxPerDay / 2;
+                    const cy = y + h / 2;
+                    const r = Math.min(10, Math.max(6, pxPerDay * 0.28));
+                    const pts = `${cx} ${cy - r} ${cx + r} ${cy} ${cx} ${cy + r} ${cx - r} ${cy}`;
+                    return (
+                      <>
+                        <polygon
+                          points={pts}
+                          fill="var(--card)"
+                          stroke={strokeColor}
+                          strokeWidth={isCritical ? 2.5 : 2}
+                          opacity={0.95}
+                        />
+                      </>
+                    );
+                  })()
+                ) : segs.length === 0 ? (
                   (() => {
                     const xDay = span?.xDay ?? (t.schedule.x ?? 0);
                     const wDay = Math.max(1, span?.wDay ?? (t.schedule.w ?? 0));
@@ -1226,7 +1271,7 @@ export const GanttChart: React.FC<Props> = ({
                     const d = barPath(x, y, w, h, true, true);
                     return (
                       <>
-                        <path d={d} fill="none" stroke={isSelected ? "var(--gantt-selected)" : "var(--text)"} strokeWidth={2} opacity={0.9} />
+                        <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
                         <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="var(--text)" style={{ pointerEvents: "none" }}>
                           {t.display_id || t.display_task_id || ""}
                         </text>
@@ -1246,8 +1291,8 @@ export const GanttChart: React.FC<Props> = ({
                           key={`${t.id}-seg-${idx}`}
                           d={d}
                           fill="none"
-                          stroke={isSelected ? "var(--gantt-selected)" : "var(--text)"}
-                          strokeWidth={2}
+                          stroke={strokeColor}
+                          strokeWidth={isCritical ? 2.5 : 2}
                           opacity={0.9}
                         />
                       );

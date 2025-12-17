@@ -388,8 +388,18 @@ class Gantt:
             # Earliest start is project start OR day after max(dep end)
             est = start
             if t.dependencies:
-                dep_end = max(scheduled[d].end for d in t.dependencies)
-                est = self._add_days(dep_end, 1, working_days=working_days, weekmask=weekmask)
+                # A 0-day task is treated as a milestone: it does NOT consume a day and
+                # should not force its successors to start "the next day".
+                # For non-milestones, successors start the day after the predecessor ends.
+                dep_ready = max(
+                    (
+                        scheduled[d].end
+                        if scheduled[d].duration_days == 0
+                        else self._add_days(scheduled[d].end, 1, working_days=working_days, weekmask=weekmask)
+                    )
+                    for d in t.dependencies
+                )
+                est = max(est, dep_ready)
 
             # If a task has an explicit planned window, we treat it as informational/derived by default
             # (e.g., pulled back from GitHub Project fields). To keep scheduling reactive to
