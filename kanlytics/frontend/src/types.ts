@@ -61,6 +61,8 @@ export type LoadCsvPathResponse = { csv_text: string; file_name?: string | null 
 
 export type SaveCsvPathResponse = { csv_path: string; bytes_written: number };
 
+export type SaveProjectResponse = { project_name: string; registry_name: string };
+
 export type ExportProjectResponse = {
   updated_issues: number;
   updated_draft_issues: number;

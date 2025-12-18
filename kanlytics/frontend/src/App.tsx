@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createPlan, schedulePlan, fetchJobStatus, startConnectProject, startExportProject, loadCsvFromPath, saveCsvToPath } from "./api";
+import { createPlan, schedulePlan, fetchJobStatus, startConnectProject, startExportProject, loadCsvFromPath, saveCsvToPath, saveProject } from "./api";
 import type { GanttLayout } from "./types";
 import { GanttChart } from "./components/GanttChart";
 import "./styles.css";
@@ -363,25 +363,34 @@ export default function App() {
     setActivePage("editProject");
   }
 
-  function ensureActiveProject(): ProjectRecord {
+  function ensureActiveProject(overrides?: Partial<ProjectRecord>): ProjectRecord {
     if (activeProjectId) {
       const existing = projects.find((p) => p.id === activeProjectId);
       if (existing) return existing;
     }
     const id = newProjectId();
-    const name = projectName.trim() || fileName.trim() || "Untitled Project";
+    const name = (overrides?.name || projectName.trim() || fileName.trim() || "Untitled Project").trim();
     const p: ProjectRecord = {
       id,
       name,
-      startDate: startDate.trim() || todayISO(),
-      workingDays: Boolean(workingDays),
-      csvText: csvText || "",
-      fileName: fileName || "",
-      projectUrl: projectUrl || "",
-      issueRepo: issueRepo || "",
+      startDate: (overrides?.startDate ?? startDate).trim() || todayISO(),
+      workingDays: overrides?.workingDays ?? Boolean(workingDays),
+      csvText: overrides?.csvText ?? (csvText || ""),
+      fileName: overrides?.fileName ?? (fileName || ""),
+      projectUrl: overrides?.projectUrl ?? (projectUrl || ""),
+      issueRepo: overrides?.issueRepo ?? (issueRepo || ""),
     };
     setProjects((prev) => [p, ...prev]);
     setActiveProjectId(id);
+
+    // Hydrate UI state immediately (otherwise imports create a project record but the header/settings look blank).
+    setProjectName(p.name);
+    setStartDate(p.startDate);
+    setWorkingDays(Boolean(p.workingDays));
+    setProjectUrl(p.projectUrl || "");
+    setIssueRepo(p.issueRepo || "");
+    setFileName(p.fileName || "");
+    setCsvText(p.csvText || "");
     return p;
   }
 
@@ -478,7 +487,8 @@ export default function App() {
     setFileName(file.name);
     const text = await file.text();
     // Ensure we have a project to associate this import with.
-    ensureActiveProject();
+    const base = file.name.replace(/\.csv$/i, "");
+    ensureActiveProject({ name: projectName.trim() || base || "Imported Project", fileName: file.name });
     setCsvText(text);
   }
 
@@ -543,9 +553,21 @@ export default function App() {
 
     // URL → GitHub connect flow (auto-start).
     if (/^https?:\/\//i.test(raw)) {
+      // Ensure we have a project to associate this import with, and hydrate UI state now.
+      let derivedName = projectName.trim();
+      try {
+        const u = new URL(raw);
+        const parts = u.pathname.split("/").filter(Boolean);
+        const orgIdx = parts.indexOf("orgs");
+        const org = orgIdx >= 0 ? parts[orgIdx + 1] : "";
+        const projIdx = parts.indexOf("projects");
+        const num = projIdx >= 0 ? parts[projIdx + 1] : "";
+        if (!derivedName) derivedName = `${org || "GitHub"} Project${num ? ` ${num}` : ""}`.trim();
+      } catch {
+        // ignore
+      }
+      ensureActiveProject({ name: derivedName || "GitHub Project", projectUrl: raw });
       setProjectUrl(raw);
-      // Ensure we have a project to associate this import with.
-      ensureActiveProject();
       setLoadProjectOpen(false);
       setGithubAutoConnect(true);
       openGithubModal("connect");
@@ -558,10 +580,12 @@ export default function App() {
       const res = await loadCsvFromPath(raw);
       setLoadProjectOpen(false);
       setActivePage("editProject");
-      ensureActiveProject();
+      // Ensure we have a project to associate this import with, and hydrate UI state now.
+      const fn = (res.file_name || "").trim();
+      const fallbackName = fn ? fn.replace(/\.csv$/i, "") : projectName.trim() || "Imported Project";
+      ensureActiveProject({ name: projectName.trim() || fallbackName, fileName: fn || fileName });
       setLayout(null);
       setPlanId("");
-      const fn = (res.file_name || "").trim();
       if (fn) setFileName(fn);
       setCsvText(res.csv_text || "");
       showToast("success", "Imported CSV.");
@@ -678,6 +702,27 @@ export default function App() {
       await saveCsvToPath(target, normalized);
       setExportProjectOpen(false);
       showToast("success", "Exported CSV.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCurrentProject() {
+    const name = projectName.trim();
+    if (!name) {
+      showToast("error", "No project selected.");
+      return;
+    }
+    if (!csvText.trim()) {
+      showToast("error", "No CSV loaded for this project.");
+      return;
+    }
+    try {
+      setBusy(true);
+      const res = await saveProject(name, csvText);
+      showToast("success", `Saved project as "${res.registry_name}".`);
     } catch (e: any) {
       showToast("error", e?.message || String(e));
     } finally {
@@ -916,9 +961,6 @@ export default function App() {
           >
             {!navCollapsed ? "Export Project" : "Export"}
           </button>
-        </div>
-
-        <div className="navBottom">
           <button type="button" className="navItem" onClick={() => setViewOptionsModalOpen(true)} title="View Options">
             {!navCollapsed ? "View Options" : "Options"}
           </button>
@@ -961,6 +1003,9 @@ export default function App() {
             </div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button type="button" onClick={() => void saveCurrentProject()} disabled={busy || !csvText.trim()} style={secondaryButtonStyle}>
+              Save
+            </button>
           </div>
         </div>
 
@@ -1084,6 +1129,27 @@ export default function App() {
                             title="Open in Edit Project"
                           >
                             Open
+                          </button>
+                          <button
+                            type="button"
+                            style={secondaryButtonStyle}
+                            onClick={() => {
+                              const name = p.name || "(untitled)";
+                              const ok = window.confirm(`Delete project "${name}"? This cannot be undone.`);
+                              if (!ok) return;
+                              setProjects((prev) => prev.filter((x) => x.id !== p.id));
+                              if (activeProjectId === p.id) {
+                                setActiveProjectId("");
+                                setProjectName("");
+                                setFileName("");
+                                setCsvText("");
+                                setLayout(null);
+                                setPlanId("");
+                              }
+                            }}
+                            title="Delete project"
+                          >
+                            Delete
                           </button>
                         </div>
                       </div>

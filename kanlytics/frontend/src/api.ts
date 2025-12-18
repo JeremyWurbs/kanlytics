@@ -8,6 +8,7 @@ import type {
   JobStatusResponse,
   LoadCsvPathResponse,
   SaveCsvPathResponse,
+  SaveProjectResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
@@ -35,6 +36,10 @@ export async function loadCsvFromPath(csvPath: string): Promise<LoadCsvPathRespo
 
 export async function saveCsvToPath(csvPath: string, csvText: string): Promise<SaveCsvPathResponse> {
   return postJson<SaveCsvPathResponse>("csv.save_path", { csv_path: csvPath, csv_text: csvText });
+}
+
+export async function saveProject(projectName: string, csvText: string): Promise<SaveProjectResponse> {
+  return postJson<SaveProjectResponse>("projects.save", { project_name: projectName, csv_text: csvText });
 }
 
 export async function schedulePlan(params: {
