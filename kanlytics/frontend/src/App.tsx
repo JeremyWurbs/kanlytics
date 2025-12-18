@@ -68,7 +68,9 @@ export default function App() {
       return "all";
     }
   });
-  const [timeAxisMode, setTimeAxisMode] = useState<"dayCount" | "calendar" | "weeks">("dayCount");
+  const [timeAxisMode, setTimeAxisMode] = useState<
+    "dayCount" | "weeks" | "months" | "calendarDays" | "calendarWeeks" | "calendarMonths"
+  >("dayCount");
   const [phaseLayout, setPhaseLayout] = useState<"linear" | "stacked">("stacked");
   const [barPadPx, setBarPadPx] = useState<number>(() => {
     try {
@@ -304,10 +306,12 @@ export default function App() {
           if (mode === "connect") {
             const csv = String((result as any).csv_text || "");
             const count = Number((result as any).task_count || 0);
+            const projectStart = String((result as any).project_start_date || "").trim();
             closeGithubModal();
             setLayout(null);
             setPlanId("");
             setFileName("github-project.csv");
+            if (projectStart) setStartDate(projectStart);
             if (csv.trim()) setCsvText(csv);
             showToast("success", `Connected. Imported ${count} items.`);
           } else {
@@ -687,7 +691,12 @@ export default function App() {
                     <select value={pxPerDay} onChange={(e) => setPxPerDay(Number(e.target.value))}>
                       {[10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80].map((v) => (
                         <option key={v} value={v}>
-                          {v} px/{timeAxisMode === "weeks" ? "week" : "day"}
+                          {v} px/
+                          {timeAxisMode === "weeks" || timeAxisMode === "calendarWeeks"
+                            ? "week"
+                            : timeAxisMode === "calendarMonths" || timeAxisMode === "months"
+                              ? "month"
+                              : "day"}
                         </option>
                       ))}
                     </select>
@@ -717,7 +726,10 @@ export default function App() {
                     <select value={timeAxisMode} onChange={(e) => setTimeAxisMode(e.target.value as any)}>
                       <option value="dayCount">Days</option>
                       <option value="weeks">Weeks</option>
-                      <option value="calendar">Calendar dates</option>
+                      <option value="months">Months</option>
+                      <option value="calendarDays">Calendar days</option>
+                      <option value="calendarWeeks">Calendar weeks</option>
+                      <option value="calendarMonths">Calendar months</option>
                     </select>
                   </div>
 

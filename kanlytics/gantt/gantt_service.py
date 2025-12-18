@@ -84,6 +84,10 @@ class ConnectProjectInput(BaseModel):
 class ConnectProjectOutput(BaseModel):
     task_count: int
     csv_text: str = Field(..., description="V2 CSV representing the project board items (Task IDs populated).")
+    project_start_date: Optional[str] = Field(
+        default=None,
+        description="Best-effort earliest Start Date across items (YYYY-MM-DD).",
+    )
 
 
 class ExportProjectInput(BaseModel):
@@ -409,7 +413,17 @@ class GanttService(Service):
             tasks.append(issue)
 
         gantt = Gantt(tasks)
-        return ConnectProjectOutput(task_count=len(tasks), csv_text=gantt.export_csv_v2())
+        earliest = None
+        for t in tasks:
+            if getattr(t, "start_date", None) is None:
+                continue
+            sd = t.start_date
+            earliest = sd if earliest is None else min(earliest, sd)
+        return ConnectProjectOutput(
+            task_count=len(tasks),
+            csv_text=gantt.export_csv_v2(),
+            project_start_date=None if earliest is None else earliest.isoformat(),
+        )
 
     def connect_project_start(self, payload: ConnectProjectInput) -> StartJobOutput:
         """
@@ -519,12 +533,22 @@ class GanttService(Service):
                 self._job_update(job_id, progress=92, message="Generating CSV…")
                 gantt = Gantt(tasks)
                 csv_text = gantt.export_csv_v2()
+                earliest = None
+                for t in tasks:
+                    if getattr(t, "start_date", None) is None:
+                        continue
+                    sd = t.start_date
+                    earliest = sd if earliest is None else min(earliest, sd)
                 self._job_update(
                     job_id,
                     state="completed",
                     progress=100,
                     message="Done.",
-                    result={"task_count": len(tasks), "csv_text": csv_text},
+                    result={
+                        "task_count": len(tasks),
+                        "csv_text": csv_text,
+                        "project_start_date": None if earliest is None else earliest.isoformat(),
+                    },
                 )
             except Exception as e:
                 self._job_update(job_id, state="failed", progress=100, message="Failed.", error=str(e))

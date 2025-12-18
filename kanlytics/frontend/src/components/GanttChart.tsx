@@ -12,7 +12,7 @@ type Props = {
   showCriticalPath?: boolean;
   detailMode?: "all" | "phaseSummary";
   projectName?: string;
-  timeAxisMode?: "dayCount" | "calendar" | "weeks";
+  timeAxisMode?: "dayCount" | "weeks" | "months" | "calendarDays" | "calendarWeeks" | "calendarMonths";
   phaseLayout?: "linear" | "stacked";
   barPadPx?: number;
 };
@@ -285,10 +285,12 @@ export const GanttChart: React.FC<Props> = ({
 
   const tasks = layout.tasks;
   const phaseSummary = detailMode === "phaseSummary";
-  const weeksMode = timeAxisMode === "weeks";
-  const unitDays = weeksMode ? 7 : 1;
+  const isWeekUnit = timeAxisMode === "weeks" || timeAxisMode === "calendarWeeks";
+  const isMonthUnit = timeAxisMode === "months" || timeAxisMode === "calendarMonths";
+  const unitMode = isWeekUnit || isMonthUnit;
   const criticalPathIds = useMemo(() => (layout.meta.critical_path || []) as string[], [layout.meta.critical_path]);
   const criticalSet = useMemo(() => new Set(criticalPathIds), [criticalPathIds]);
+  const criticalIdSet = criticalSet;
 
   const phases = useMemo(() => {
     const s = new Set<string>();
@@ -317,10 +319,10 @@ export const GanttChart: React.FC<Props> = ({
   }, [phaseSummary, filtered, tasks, criticalSet]);
 
   const renderTasksNoMilestones = useMemo(() => {
-    if (!weeksMode) return renderTasks;
-    // Weeks view shows aggregated bubbles; drop 0-day tasks entirely.
+    if (!unitMode) return renderTasks;
+    // Unit-based views use aggregated bubbles; drop 0-day tasks entirely.
     return renderTasks.filter(t => (t.schedule.w ?? 0) > 0);
-  }, [renderTasks, weeksMode]);
+  }, [renderTasks, unitMode]);
 
   // If the selected task disappears (new plan/filtering), clear selection.
   useEffect(() => {
@@ -358,6 +360,22 @@ export const GanttChart: React.FC<Props> = ({
   const spanById = useMemo(() => {
     const m = new Map<string, { xDay: number; wDay: number }>();
     const MS_DAY = 24 * 60 * 60 * 1000;
+
+    const baseDate = new Date(baseUtc);
+    const baseYear = baseDate.getUTCFullYear();
+    const baseMonth = baseDate.getUTCMonth(); // 0..11
+    const baseMonthStartUtc = Date.UTC(baseYear, baseMonth, 1);
+    const daysInMonthUtc = (y: number, mo: number) => new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    const monthCoordForDayBoundary = (dayOffset: number) => {
+      const d = new Date(baseUtc + dayOffset * MS_DAY);
+      const y = d.getUTCFullYear();
+      const mo = d.getUTCMonth();
+      const day0 = d.getUTCDate() - 1; // 0-based within month
+      const monthsSinceBase = (y - baseYear) * 12 + (mo - baseMonth);
+      const dim = daysInMonthUtc(y, mo);
+      return monthsSinceBase + day0 / dim;
+    };
+
     for (const t of renderTasksNoMilestones) {
       const startUtc = parseIsoDateUtc(t.schedule.start);
       const endUtc = parseIsoDateUtc(t.schedule.end);
@@ -373,21 +391,28 @@ export const GanttChart: React.FC<Props> = ({
       const daySpan =
         (t.schedule.w ?? 0) === 0 ? 0 : Math.max(0, Math.floor((endUtc - startUtc) / MS_DAY) + 1); // inclusive end
 
-      if (!weeksMode) {
+      if (!unitMode) {
         m.set(t.id, { xDay: startDay, wDay: daySpan });
         continue;
       }
 
       if (daySpan <= 0) {
-        m.set(t.id, { xDay: startDay / 7, wDay: 0 });
+        if (isMonthUnit) m.set(t.id, { xDay: monthCoordForDayBoundary(startDay), wDay: 0 });
+        else m.set(t.id, { xDay: startDay / 7, wDay: 0 });
         continue;
       }
-      // Weeks mode uses fractional week coordinates so bars end on the correct day boundary.
-      // xDay/wDay here are actually "xWeek / wWeek" units.
-      m.set(t.id, { xDay: startDay / 7, wDay: daySpan / 7 });
+      if (isMonthUnit) {
+        // Calendar months: fractional month coordinates based on day boundaries.
+        const x0 = monthCoordForDayBoundary(startDay);
+        const x1 = monthCoordForDayBoundary(startDay + daySpan);
+        m.set(t.id, { xDay: x0, wDay: Math.max(0, x1 - x0) });
+      } else {
+        // Weeks/calendar weeks: fractional week coordinates so bars end on the correct day boundary.
+        m.set(t.id, { xDay: startDay / 7, wDay: daySpan / 7 });
+      }
     }
     return m;
-  }, [renderTasksNoMilestones, baseUtc, weeksMode]);
+  }, [renderTasksNoMilestones, baseUtc, unitMode, isMonthUnit]);
 
   const phaseStartByPhase = useMemo(() => {
     const m = new Map<string, number>();
@@ -406,10 +431,11 @@ export const GanttChart: React.FC<Props> = ({
     const m = new Map<string, number>();
     if (phaseLayout !== "stacked") return m;
     for (const [ph, startDay] of phaseStartByPhase.entries()) {
-      m.set(ph, baseUtc + startDay * unitDays * 24 * 60 * 60 * 1000);
+      // Base is only used for weekend shading / calendar labels; for unit-based views we don't need this.
+      m.set(ph, baseUtc + startDay * 24 * 60 * 60 * 1000);
     }
     return m;
-  }, [phaseStartByPhase, baseUtc, phaseLayout, unitDays]);
+  }, [phaseStartByPhase, baseUtc, phaseLayout]);
 
   const drawSpanById = useMemo(() => {
     // The spans used for drawing bars (xDay in chart coordinates).
@@ -444,14 +470,14 @@ export const GanttChart: React.FC<Props> = ({
       return dow === 0 || dow === 6;
     };
 
-    const splitOnWeekends = Boolean(layout.meta.working_days) && !weeksMode;
+    const splitOnWeekends = Boolean(layout.meta.working_days) && !unitMode;
 
     for (const t of renderTasksNoMilestones) {
       const span = drawSpanById.get(t.id);
       if (!span) continue;
 
-      // Weeks mode: treat each task as a single continuous segment.
-      if (weeksMode) {
+      // Unit-based modes: treat each task as a single continuous segment.
+      if (unitMode) {
         m.set(t.id, [{ xDay: span.xDay, wDay: Math.max(0, span.wDay), roundLeft: true, roundRight: true }]);
         continue;
       }
@@ -503,7 +529,7 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, segs);
     }
     return m;
-  }, [renderTasksNoMilestones, drawSpanById, baseUtc, baseUtcByPhase, phaseLayout, layout.meta.working_days, weeksMode]);
+  }, [renderTasksNoMilestones, drawSpanById, baseUtc, baseUtcByPhase, phaseLayout, layout.meta.working_days, unitMode]);
 
   const barEndsById = useMemo(() => {
     // For arrows: use the first segment start and last segment end (in day units).
@@ -513,7 +539,7 @@ export const GanttChart: React.FC<Props> = ({
       const span = drawSpanById.get(t.id);
       if (!span) continue;
 
-      if (weeksMode) {
+      if (unitMode) {
         // Weeks mode uses fractional units; use exact span without rounding to full weeks.
         const startXDay = span.xDay;
         const endXDay = span.xDay + Math.max(0, span.wDay);
@@ -541,7 +567,7 @@ export const GanttChart: React.FC<Props> = ({
       m.set(t.id, { startXDay, endXDay });
     }
     return m;
-  }, [renderTasksNoMilestones, segmentsById, drawSpanById, weeksMode]);
+  }, [renderTasksNoMilestones, segmentsById, drawSpanById, unitMode]);
 
   const maxXDay = useMemo(() => {
     let m = 0;
@@ -640,7 +666,7 @@ export const GanttChart: React.FC<Props> = ({
 
   const depPaths = useMemo(
     () =>
-      showDeps && !phaseSummary && !weeksMode
+      showDeps && !phaseSummary && !unitMode
         ? buildDepPaths(
             renderTasks,
             layout.edges,
@@ -670,12 +696,12 @@ export const GanttChart: React.FC<Props> = ({
       showDeps,
       barPadPx,
       phaseSummary,
-      weeksMode,
+      unitMode,
     ]
   );
 
   const rowBubbles = useMemo(() => {
-    const bubbleMode = weeksMode || (phaseSummary && phaseLayout === "stacked");
+    const bubbleMode = unitMode || (phaseSummary && phaseLayout === "stacked");
     if (!bubbleMode) return [];
 
     type Bubble = {
@@ -696,7 +722,7 @@ export const GanttChart: React.FC<Props> = ({
 
       const startX = span.xDay;
       const endX = span.xDay + Math.max(0, span.wDay);
-      const isCritical = Boolean(t.is_critical || (t.slack_days ?? 0) === 0);
+      const isCritical = Boolean(criticalIdSet.has(t.id) || t.is_critical || (t.slack_days ?? 0) === 0);
       const startUtc = parseIsoDateUtc(t.schedule.start);
 
       const cur = byRow.get(rowIdx);
@@ -721,7 +747,7 @@ export const GanttChart: React.FC<Props> = ({
     }
 
     return Array.from(byRow.values()).sort((a, b) => a.rowIdx - b.rowIdx);
-  }, [weeksMode, phaseSummary, phaseLayout, renderTasksNoMilestones, drawSpanById, rowIndexById]);
+  }, [unitMode, phaseSummary, phaseLayout, renderTasksNoMilestones, drawSpanById, rowIndexById]);
 
   const ticks = useMemo(() => {
     const N = Math.ceil(width / pxPerDay);
@@ -737,6 +763,11 @@ export const GanttChart: React.FC<Props> = ({
 
   const formatTickForBase = useMemo(() => {
     const MS_DAY = 24 * 60 * 60 * 1000;
+    const monthFmt = new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" });
+    const base0 = new Date(baseUtc);
+    const base0Y = base0.getUTCFullYear();
+    const base0M = base0.getUTCMonth();
+
     if (timeAxisMode === "weeks") {
       return (base: number, d: number) => {
         const offsetDays = Math.round((base - baseUtc) / MS_DAY);
@@ -744,7 +775,27 @@ export const GanttChart: React.FC<Props> = ({
         return String(offsetWeeks + d);
       };
     }
-    if (timeAxisMode !== "calendar") {
+    if (timeAxisMode === "calendarWeeks") {
+      return (base: number, d: number) => dateFmt.format(new Date(base + d * 7 * MS_DAY));
+    }
+    if (timeAxisMode === "months") {
+      return (base: number, d: number) => {
+        const dt = new Date(base);
+        const y = dt.getUTCFullYear();
+        const mo = dt.getUTCMonth();
+        const offsetMonths = (y - base0Y) * 12 + (mo - base0M);
+        return String(offsetMonths + d);
+      };
+    }
+    if (timeAxisMode === "calendarMonths") {
+      return (base: number, d: number) => {
+        const dt = new Date(base);
+        const y = dt.getUTCFullYear();
+        const mo = dt.getUTCMonth();
+        return monthFmt.format(new Date(Date.UTC(y, mo + d, 1)));
+      };
+    }
+    if (timeAxisMode !== "calendarDays") {
       // In stacked layout each phase uses its own "base" (min start within that phase).
       // For a global day counter, offset each phase by how many calendar days it starts
       // after the overall project start (baseUtc).
@@ -762,7 +813,7 @@ export const GanttChart: React.FC<Props> = ({
   const dayBands = useMemo(() => {
     // Background banding for LINEAR mode (single global axis).
     const out: { d: number; fill: string }[] = [];
-    if (weeksMode) {
+    if (unitMode) {
       for (let d = 0; d <= dayCount; d += 1) {
         out.push({ d, fill: d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)" });
       }
@@ -782,7 +833,7 @@ export const GanttChart: React.FC<Props> = ({
       }
     }
     return out;
-  }, [baseUtc, dayCount, weeksMode]);
+  }, [baseUtc, dayCount, unitMode]);
 
   function selectTask(id: string) {
     setSelectedId(id);
@@ -1352,9 +1403,9 @@ export const GanttChart: React.FC<Props> = ({
                 const y0 = sec.startRowIdx * rowHeight;
                 const secH = (sec.endRowIdx - sec.startRowIdx + 1) * rowHeight;
 
-                // Build alternating weekday colors, resetting per phase.
+                // Build alternating bands, resetting per phase.
                 const fills: string[] = [];
-                if (weeksMode) {
+                if (unitMode) {
                   for (let d = 0; d <= dayCount; d += 1) {
                     fills.push(d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
                   }
@@ -1426,7 +1477,7 @@ export const GanttChart: React.FC<Props> = ({
             <path key={p.key} d={p.d} fill="none" stroke="var(--gantt-dep)" strokeWidth={1} />
           ))}
 
-          {weeksMode || (phaseSummary && phaseLayout === "stacked")
+          {unitMode || (phaseSummary && phaseLayout === "stacked")
             ? rowBubbles.map((b) => {
                 const y = b.rowIdx * rowHeight + 5;
                 const h = rowHeight - 10;
@@ -1446,8 +1497,19 @@ export const GanttChart: React.FC<Props> = ({
                 if (phaseSummary && phaseLayout === "stacked" && b.startUtc != null) {
                   const MS_DAY = 24 * 60 * 60 * 1000;
                   const offDays = Math.max(0, Math.floor((b.startUtc - baseUtc) / MS_DAY));
-                  if (timeAxisMode === "calendar") {
+                  if (timeAxisMode === "calendarDays") {
                     bubbleLabel = dateFmt.format(new Date(b.startUtc));
+                  } else if (timeAxisMode === "calendarWeeks") {
+                    const wkStartUtc = baseUtc + Math.floor(offDays / 7) * 7 * MS_DAY;
+                    bubbleLabel = dateFmt.format(new Date(wkStartUtc));
+                  } else if (timeAxisMode === "calendarMonths") {
+                    const monthFmt = new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" });
+                    bubbleLabel = monthFmt.format(new Date(b.startUtc));
+                  } else if (timeAxisMode === "months") {
+                    const dt0 = new Date(baseUtc);
+                    const dt = new Date(b.startUtc);
+                    const offMonths = (dt.getUTCFullYear() - dt0.getUTCFullYear()) * 12 + (dt.getUTCMonth() - dt0.getUTCMonth());
+                    bubbleLabel = String(offMonths);
                   } else if (timeAxisMode === "weeks") {
                     bubbleLabel = String(Math.floor(offDays / 7));
                   } else {
@@ -1491,7 +1553,9 @@ export const GanttChart: React.FC<Props> = ({
             const labelRendered = false;
             const isSelected = t.id === selectedId;
             const isMilestone = (span?.wDay ?? 0) === 0;
-            const isCritical = showCriticalPath && (t.is_critical || (t.slack_days ?? 0) === 0);
+            const isCritical =
+              showCriticalPath &&
+              (criticalIdSet.has(t.id) || t.is_critical || (t.slack_days ?? 0) === 0);
             const strokeColor = isSelected ? "var(--gantt-selected)" : isCritical ? "var(--gantt-critical)" : "var(--text)";
             return (
               <g
