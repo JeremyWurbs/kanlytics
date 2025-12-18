@@ -77,6 +77,28 @@ class LayoutOutput(BaseModel):
     layout: Dict[str, Any]
 
 
+class LoadCsvPathInput(BaseModel):
+    csv_path: str = Field(
+        ...,
+        description="Local filesystem path to a V2 CSV file. This path is read by the backend (for local dev).",
+    )
+
+
+class LoadCsvPathOutput(BaseModel):
+    csv_text: str = Field(..., description="Full CSV file contents as UTF-8 text.")
+    file_name: Optional[str] = Field(default=None, description="Best-effort file name derived from the path.")
+
+
+class SaveCsvPathInput(BaseModel):
+    csv_path: str = Field(..., description="Local filesystem path to write the CSV to.")
+    csv_text: str = Field(..., description="CSV contents as UTF-8 text.")
+
+
+class SaveCsvPathOutput(BaseModel):
+    csv_path: str
+    bytes_written: int
+
+
 class ConnectProjectInput(BaseModel):
     project_url: str = Field(..., description="GitHub ProjectV2 board URL (e.g. https://github.com/orgs/<org>/projects/<n>).")
 
@@ -151,6 +173,18 @@ layout_task = TaskSchema(
     name="gantt.layout",
     input_schema=LayoutInput,
     output_schema=LayoutOutput,
+)
+
+load_csv_path_task = TaskSchema(
+    name="csv.load_path",
+    input_schema=LoadCsvPathInput,
+    output_schema=LoadCsvPathOutput,
+)
+
+save_csv_path_task = TaskSchema(
+    name="csv.save_path",
+    input_schema=SaveCsvPathInput,
+    output_schema=SaveCsvPathOutput,
 )
 
 class CriticalPathInput(BaseModel):
@@ -233,6 +267,8 @@ class GanttService(Service):
         )
 
         self.add_endpoint("gantt.create_plan", self.create_plan, schema=create_plan_task)
+        self.add_endpoint("csv.load_path", self.load_csv_path, schema=load_csv_path_task)
+        self.add_endpoint("csv.save_path", self.save_csv_path, schema=save_csv_path_task)
         self.add_endpoint("gantt.schedule", self.schedule, schema=schedule_task)
         self.add_endpoint("gantt.layout", self.get_layout, schema=layout_task)
         self.add_endpoint("gantt.critical_path", self.get_critical_path, schema=critical_path_task)
@@ -245,6 +281,51 @@ class GanttService(Service):
     # -------------
     # Endpoints
     # -------------
+
+    def load_csv_path(self, payload: LoadCsvPathInput) -> LoadCsvPathOutput:
+        raw = (payload.csv_path or "").strip()
+        if not raw:
+            raise ValueError("csv_path is required.")
+
+        # Expand "~" and environment variables, then normalize.
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
+        if not os.path.exists(path):
+            raise ValueError(f"CSV path does not exist: {path}")
+        if not os.path.isfile(path):
+            raise ValueError(f"CSV path is not a file: {path}")
+        if not path.lower().endswith(".csv"):
+            raise ValueError("Only .csv files are supported.")
+
+        # Basic safety: avoid accidentally loading giant files.
+        size = os.path.getsize(path)
+        if size > 10 * 1024 * 1024:
+            raise ValueError("CSV file is too large (>10MB).")
+
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            text = f.read()
+
+        return LoadCsvPathOutput(csv_text=text, file_name=os.path.basename(path))
+
+    def save_csv_path(self, payload: SaveCsvPathInput) -> SaveCsvPathOutput:
+        raw = (payload.csv_path or "").strip()
+        if not raw:
+            raise ValueError("csv_path is required.")
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
+        if not path.lower().endswith(".csv"):
+            raise ValueError("Only .csv files are supported.")
+
+        parent = os.path.dirname(path) or "."
+        if not os.path.exists(parent):
+            raise ValueError(f"Parent directory does not exist: {parent}")
+        if not os.path.isdir(parent):
+            raise ValueError(f"Parent path is not a directory: {parent}")
+
+        text = payload.csv_text or ""
+        data = text.encode("utf-8")
+        with open(path, "wb") as f:
+            f.write(data)
+
+        return SaveCsvPathOutput(csv_path=path, bytes_written=len(data))
 
     def create_plan(self, payload: CreatePlanInput) -> CreatePlanOutput:
         """

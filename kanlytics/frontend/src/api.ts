@@ -6,6 +6,8 @@ import type {
   ExportProjectResponse,
   StartJobResponse,
   JobStatusResponse,
+  LoadCsvPathResponse,
+  SaveCsvPathResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
@@ -25,6 +27,14 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export async function createPlan(csvText: string, projectName?: string): Promise<CreatePlanResponse> {
   return postJson<CreatePlanResponse>("gantt.create_plan", { csv_text: csvText, project_name: projectName });
+}
+
+export async function loadCsvFromPath(csvPath: string): Promise<LoadCsvPathResponse> {
+  return postJson<LoadCsvPathResponse>("csv.load_path", { csv_path: csvPath });
+}
+
+export async function saveCsvToPath(csvPath: string, csvText: string): Promise<SaveCsvPathResponse> {
+  return postJson<SaveCsvPathResponse>("csv.save_path", { csv_path: csvPath, csv_text: csvText });
 }
 
 export async function schedulePlan(params: {

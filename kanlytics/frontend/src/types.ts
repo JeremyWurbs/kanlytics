@@ -55,7 +55,11 @@ export type CreatePlanResponse = { plan_id: string; task_count: number; normaliz
 export type ScheduleResponse = { plan_id: string; layout: GanttLayout };
 export type LayoutResponse = { plan_id: string; layout: GanttLayout };
 
-export type ConnectProjectResponse = { task_count: number; csv_text: string };
+export type ConnectProjectResponse = { task_count: number; csv_text: string; project_start_date?: string | null };
+
+export type LoadCsvPathResponse = { csv_text: string; file_name?: string | null };
+
+export type SaveCsvPathResponse = { csv_path: string; bytes_written: number };
 
 export type ExportProjectResponse = {
   updated_issues: number;
