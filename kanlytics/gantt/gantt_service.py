@@ -8,12 +8,14 @@ import threading
 import tempfile
 import os
 import time
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 
 from mindtrace.services import Service
 from mindtrace.core.types.task_schema import TaskSchema
+from mindtrace.registry import Registry
 
 from .gantt import Gantt
 from kanlytics.core.github_issue import GitHubIssue
@@ -97,6 +99,39 @@ class SaveCsvPathInput(BaseModel):
 class SaveCsvPathOutput(BaseModel):
     csv_path: str
     bytes_written: int
+
+
+class SaveProjectInput(BaseModel):
+    project_name: str = Field(..., description="Project display name used as the Registry key.")
+    csv_text: str = Field(..., description="Project CSV contents to persist.")
+
+
+class SaveProjectOutput(BaseModel):
+    project_name: str
+    registry_name: str
+
+
+class LoadProjectInput(BaseModel):
+    project_name: str = Field(..., description="Project display name (or registry key).")
+    output_path: Optional[str] = Field(
+        default=None,
+        description="Optional output path to place the CSV file (passed through to Registry.load output_dir).",
+    )
+
+
+class LoadProjectOutput(BaseModel):
+    project_name: str
+    registry_name: str
+    csv_text: str
+    csv_path: str
+
+
+class ListProjectsOutput(BaseModel):
+    project_names: list[str]
+
+
+class ListProjectsInput(BaseModel):
+    pass
 
 
 class ConnectProjectInput(BaseModel):
@@ -187,6 +222,24 @@ save_csv_path_task = TaskSchema(
     output_schema=SaveCsvPathOutput,
 )
 
+save_project_task = TaskSchema(
+    name="projects.save",
+    input_schema=SaveProjectInput,
+    output_schema=SaveProjectOutput,
+)
+
+load_project_task = TaskSchema(
+    name="projects.load",
+    input_schema=LoadProjectInput,
+    output_schema=LoadProjectOutput,
+)
+
+list_projects_task = TaskSchema(
+    name="projects.list",
+    input_schema=ListProjectsInput,
+    output_schema=ListProjectsOutput,
+)
+
 class CriticalPathInput(BaseModel):
     plan_id: str
 
@@ -254,6 +307,7 @@ class GanttService(Service):
         self._plans: Dict[str, Gantt] = {}
         self._layouts: Dict[str, Dict[str, Any]] = {}
         self._jobs: Dict[str, JobStatusOutput] = {}
+        self._project_registry = Registry("~/.cache/kanlytics/projects")
 
         self.app.add_middleware(
             CORSMiddleware,
@@ -269,6 +323,9 @@ class GanttService(Service):
         self.add_endpoint("gantt.create_plan", self.create_plan, schema=create_plan_task)
         self.add_endpoint("csv.load_path", self.load_csv_path, schema=load_csv_path_task)
         self.add_endpoint("csv.save_path", self.save_csv_path, schema=save_csv_path_task)
+        self.add_endpoint("projects.save", self.save_project, schema=save_project_task)
+        self.add_endpoint("projects.load", self.load_project, schema=load_project_task)
+        self.add_endpoint("projects.list", self.list_projects, schema=list_projects_task)
         self.add_endpoint("gantt.schedule", self.schedule, schema=schedule_task)
         self.add_endpoint("gantt.layout", self.get_layout, schema=layout_task)
         self.add_endpoint("gantt.critical_path", self.get_critical_path, schema=critical_path_task)
@@ -281,6 +338,32 @@ class GanttService(Service):
     # -------------
     # Endpoints
     # -------------
+
+    @staticmethod
+    def _registry_key_from_display_name(display_name: str) -> str:
+        # Registry disallows '_' and '@'. It recommends ':' for namespacing.
+        name = (display_name or "").strip()
+        name = name.replace("_", ":").replace("@", ":")
+        return name
+
+    def _resolve_registry_name(self, project_name: str) -> str:
+        # First try normalized key directly.
+        key = self._registry_key_from_display_name(project_name)
+        if self._project_registry.has_object(key):
+            return key
+
+        # Otherwise, try matching stored metadata display_name.
+        for obj_name in self._project_registry.list_objects():
+            try:
+                info = self._project_registry.info(obj_name) or {}
+                # info is dict[version -> metadata]
+                for v_meta in info.values():
+                    md = (v_meta or {}).get("metadata") or {}
+                    if md.get("display_name") == project_name:
+                        return obj_name
+            except Exception:
+                continue
+        raise ValueError(f"Project not found in registry: {project_name}")
 
     def load_csv_path(self, payload: LoadCsvPathInput) -> LoadCsvPathOutput:
         raw = (payload.csv_path or "").strip()
@@ -326,6 +409,60 @@ class GanttService(Service):
             f.write(data)
 
         return SaveCsvPathOutput(csv_path=path, bytes_written=len(data))
+
+    def save_project(self, payload: SaveProjectInput) -> SaveProjectOutput:
+        display_name = (payload.project_name or "").strip()
+        if not display_name:
+            raise ValueError("project_name is required.")
+
+        registry_name = self._registry_key_from_display_name(display_name)
+        if not registry_name:
+            raise ValueError("project_name is invalid after normalization.")
+
+        # Write CSV to a temp file then save the file path into the registry.
+        fd, tmp_path = tempfile.mkstemp(prefix="kanlytics-project-", suffix=".csv")
+        os.close(fd)
+        try:
+            Path(tmp_path).write_text(payload.csv_text or "", encoding="utf-8")
+            self._project_registry.save(registry_name, Path(tmp_path), metadata={"display_name": display_name})
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+        return SaveProjectOutput(project_name=display_name, registry_name=registry_name)
+
+    def load_project(self, payload: LoadProjectInput) -> LoadProjectOutput:
+        display_name = (payload.project_name or "").strip()
+        if not display_name:
+            raise ValueError("project_name is required.")
+
+        registry_name = self._resolve_registry_name(display_name)
+        loaded_path = self._project_registry.load(registry_name, output_dir=payload.output_path)
+        path_str = str(loaded_path)
+        text = Path(path_str).read_text(encoding="utf-8-sig")
+        return LoadProjectOutput(project_name=display_name, registry_name=registry_name, csv_text=text, csv_path=path_str)
+
+    def list_projects(self, payload: ListProjectsInput) -> ListProjectsOutput:
+        names: list[str] = []
+        for obj_name in self._project_registry.list_objects():
+            display = obj_name
+            try:
+                info = self._project_registry.info(obj_name) or {}
+                # Prefer latest version metadata
+                if info:
+                    # versions are strings; try numeric max
+                    versions = sorted(info.keys(), key=lambda s: int(s) if str(s).isdigit() else -1)
+                    latest = info.get(versions[-1]) if versions else None
+                    md = (latest or {}).get("metadata") or {}
+                    display = md.get("display_name") or obj_name
+            except Exception:
+                display = obj_name
+            names.append(str(display))
+        # Stable display order
+        names = sorted(set(names), key=lambda s: s.lower())
+        return ListProjectsOutput(project_names=names)
 
     def create_plan(self, payload: CreatePlanInput) -> CreatePlanOutput:
         """
