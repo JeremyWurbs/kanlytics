@@ -81,6 +81,72 @@
 body { margin: 0; background: var(--bg); color: var(--text); }
 /* Use more horizontal space on wide screens */
 .container { max-width: 1600px; margin: 0 auto; padding: 24px; }
+
+/* App shell with collapsible left nav */
+.appShell {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: 100vh;
+}
+.navSidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--card);
+  padding: 14px 12px;
+}
+.navSidebar.isCollapsed {
+  width: 72px;
+  overflow: hidden;
+}
+.appShell:has(.navSidebar.isCollapsed) {
+  grid-template-columns: 72px 1fr;
+}
+.navSidebar.isCollapsed .navTop {
+  justify-content: center;
+}
+.navSidebar.isCollapsed .navItems {
+  display: none;
+}
+.appMain {
+  min-width: 0;
+}
+.navTop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.navBrand {
+  font-weight: 900;
+  letter-spacing: 0.2px;
+}
+.navIconBtn {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 12px;
+  border: 1px solid var(--border-2);
+  background: var(--card);
+  color: var(--text);
+}
+.navItems {
+  display: grid;
+  gap: 10px;
+}
+.navItem {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.navItem.isActive {
+  border-color: var(--gantt-selected);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
 .card {
   background: var(--card);
   border: 1px solid var(--border);
