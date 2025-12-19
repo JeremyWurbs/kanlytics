@@ -13,6 +13,8 @@ import type {
   AppendTaskResponse,
   UpdateTaskResponse,
   DeleteTaskResponse,
+  GetPhaseMetaResponse,
+  UpdatePhaseMetaResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
@@ -55,6 +57,7 @@ export async function appendTask(params: {
   projectName?: string;
   phase: string;
   title: string;
+  repo: string;
   body?: string;
   acceptanceCriteria?: string;
   dependencies?: string[];
@@ -67,6 +70,7 @@ export async function appendTask(params: {
     project_name: params.projectName,
     phase: params.phase,
     title: params.title,
+    repo: params.repo,
     body: params.body,
     acceptance_criteria: params.acceptanceCriteria,
     dependencies: params.dependencies || [],
@@ -80,6 +84,7 @@ export async function updateTask(params: {
   csvText: string;
   taskId: string;
   title?: string;
+  repo?: string;
   body?: string;
   acceptanceCriteria?: string;
   dependencies?: string[];
@@ -90,6 +95,7 @@ export async function updateTask(params: {
     csv_text: params.csvText,
     task_id: params.taskId,
     title: params.title,
+    repo: params.repo,
     body: params.body,
     acceptance_criteria: params.acceptanceCriteria,
     dependencies: params.dependencies,
@@ -100,6 +106,57 @@ export async function updateTask(params: {
 
 export async function deleteTask(params: { csvText: string; taskId: string }): Promise<DeleteTaskResponse> {
   return postJson<DeleteTaskResponse>("gantt.delete_task", { csv_text: params.csvText, task_id: params.taskId });
+}
+
+export async function getPhaseMeta(params: {
+  projectUrl: string;
+  phase: string;
+  issueRepo?: string;
+}): Promise<GetPhaseMetaResponse> {
+  return postJson<GetPhaseMetaResponse>("github.get_phase_meta", {
+    project_url: params.projectUrl,
+    phase: params.phase,
+    issue_repo: params.issueRepo,
+  });
+}
+
+export async function updatePhaseMeta(params: {
+  projectUrl: string;
+  phase: string;
+  description: string;
+  issueRepo?: string;
+}): Promise<UpdatePhaseMetaResponse> {
+  return postJson<UpdatePhaseMetaResponse>("github.update_phase_meta", {
+    project_url: params.projectUrl,
+    phase: params.phase,
+    description: params.description,
+    issue_repo: params.issueRepo,
+  });
+}
+
+export async function getPhaseMetaCsv(params: { repo: string; projectName: string; csvText: string; phase: string }): Promise<GetPhaseMetaResponse> {
+  return postJson<GetPhaseMetaResponse>("github.get_phase_meta_csv", {
+    repo: params.repo,
+    project_name: params.projectName,
+    csv_text: params.csvText,
+    phase: params.phase,
+  });
+}
+
+export async function updatePhaseMetaCsv(params: {
+  repo: string;
+  projectName: string;
+  csvText: string;
+  phase: string;
+  description: string;
+}): Promise<UpdatePhaseMetaResponse> {
+  return postJson<UpdatePhaseMetaResponse>("github.update_phase_meta_csv", {
+    repo: params.repo,
+    project_name: params.projectName,
+    csv_text: params.csvText,
+    phase: params.phase,
+    description: params.description,
+  });
 }
 
 export async function schedulePlan(params: {

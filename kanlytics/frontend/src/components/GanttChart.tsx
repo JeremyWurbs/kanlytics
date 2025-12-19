@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Edge, GanttLayout, TaskItem } from "../types";
+import type { Edge, GanttLayout, PhaseMeta, TaskItem } from "../types";
 
 type Props = {
   layout: GanttLayout;
@@ -23,6 +23,13 @@ type Props = {
   onAddTask?: (phase: string) => void;
   onEditTask?: (taskId: string) => void;
   onDeleteTask?: (taskId: string) => void;
+  onFetchPhaseMeta?: (phase: string) => Promise<PhaseMeta>;
+  onSavePhaseMeta?: (phase: string, description: string) => Promise<PhaseMeta>;
+  suppressInfoPanel?: boolean;
+  exportId?: string;
+  hideHeader?: boolean;
+  axisBaseDate?: string;
+  axisMaxXDay?: number;
 };
 
 function groupByPhase(tasks: TaskItem[]) {
@@ -292,6 +299,13 @@ export const GanttChart: React.FC<Props> = ({
   onAddTask,
   onEditTask,
   onDeleteTask,
+  onFetchPhaseMeta,
+  onSavePhaseMeta,
+  suppressInfoPanel = false,
+  exportId,
+  hideHeader = false,
+  axisBaseDate,
+  axisMaxXDay,
 }) => {
   const formatPhaseLabel = (ph: string) => {
     const major = phaseMajors[ph];
@@ -305,6 +319,13 @@ export const GanttChart: React.FC<Props> = ({
   const setPhaseFilter = onPhaseFilterChange || setPhaseFilterInternal;
   const [phasePickerOpen, setPhasePickerOpen] = useState<boolean>(false);
   const [selectedId, setSelectedId] = useState<string>("");
+  const [selectedPhase, setSelectedPhase] = useState<string>("");
+  const [phaseMeta, setPhaseMeta] = useState<PhaseMeta | null>(null);
+  const [phaseMetaErr, setPhaseMetaErr] = useState<string>("");
+  const [phaseMetaBusy, setPhaseMetaBusy] = useState<boolean>(false);
+  const [editPhaseOpen, setEditPhaseOpen] = useState<boolean>(false);
+  const [editPhaseTab, setEditPhaseTab] = useState<"write" | "preview">("write");
+  const [editPhaseDescription, setEditPhaseDescription] = useState<string>("");
   const [infoOpen, setInfoOpen] = useState<boolean>(false);
 
   const tasks = layout.tasks;
@@ -397,8 +418,42 @@ export const GanttChart: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.length]);
 
+  // If phases change and the selected phase no longer exists, clear selection.
+  useEffect(() => {
+    if (!selectedPhase) return;
+    if (phases.includes(selectedPhase)) return;
+    setSelectedPhase("");
+    setPhaseMeta(null);
+    setPhaseMetaErr("");
+    setInfoOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phases.join("|")]);
+
   const taskById = useMemo(() => new Map(tasks.map(t => [t.id, t])), [tasks]);
   const selected = useMemo(() => (selectedId ? taskById.get(selectedId) : undefined), [selectedId, taskById]);
+
+  async function selectPhase(phase: string) {
+    const ph = (phase || "").trim();
+    if (!ph) return;
+    setSelectedId("");
+    setSelectedPhase(ph);
+    setInfoOpen(true);
+    setPhaseMeta(null);
+    setPhaseMetaErr("");
+    if (!onFetchPhaseMeta) {
+      setPhaseMetaErr("No GitHub connection available for phase meta issues.");
+      return;
+    }
+    try {
+      setPhaseMetaBusy(true);
+      const meta = await onFetchPhaseMeta(ph);
+      setPhaseMeta(meta);
+    } catch (e: any) {
+      setPhaseMetaErr(e?.message || String(e));
+    } finally {
+      setPhaseMetaBusy(false);
+    }
+  }
 
   const displayById = useMemo(() => {
     const m = new Map<string, string>();
@@ -418,8 +473,11 @@ export const GanttChart: React.FC<Props> = ({
     return m;
   }, [layout.edges]);
 
-  // Base project start (UTC midnight).
-  const baseUtc = useMemo(() => parseIsoDateUtc(layout.meta.project_start) ?? Date.now(), [layout.meta.project_start]);
+  // Base project start (UTC midnight). Can be overridden for multi-project shared time-axis views.
+  const baseUtc = useMemo(
+    () => parseIsoDateUtc(axisBaseDate || layout.meta.project_start) ?? Date.now(),
+    [axisBaseDate, layout.meta.project_start],
+  );
 
   const spanById = useMemo(() => {
     const m = new Map<string, { xDay: number; wDay: number }>();
@@ -633,7 +691,7 @@ export const GanttChart: React.FC<Props> = ({
     return m;
   }, [renderTasksNoMilestones, segmentsById, drawSpanById, unitMode]);
 
-  const maxXDay = useMemo(() => {
+  const maxXDayLocal = useMemo(() => {
     let m = 0;
     for (const t of renderTasksNoMilestones) {
       const ends = barEndsById.get(t.id);
@@ -642,6 +700,8 @@ export const GanttChart: React.FC<Props> = ({
     }
     return m;
   }, [renderTasksNoMilestones, barEndsById]);
+
+  const maxXDay = axisMaxXDay != null ? Math.max(maxXDayLocal, axisMaxXDay) : maxXDayLocal;
 
   const width = Math.max(900, (maxXDay + 5) * pxPerDay);
   const chartPadLeft = 10; // pixels of breathing room at left edge
@@ -732,7 +792,13 @@ export const GanttChart: React.FC<Props> = ({
     return m;
   }, [phaseSections, phaseSummary]);
 
-  const height = useMemo(() => Math.max(220, (displayRows.length + 1) * rowHeight), [displayRows.length, rowHeight]);
+  const height = useMemo(() => {
+    const rowsH = displayRows.length * rowHeight;
+    // In compact multi-project views, don't force an artificial minimum height —
+    // it creates visible "empty rows" under the task list.
+    if (hideHeader) return rowsH;
+    return Math.max(220, rowsH);
+  }, [displayRows.length, rowHeight, hideHeader]);
 
   const depPaths = useMemo(
     () =>
@@ -821,7 +887,15 @@ export const GanttChart: React.FC<Props> = ({
 
   const ticks = useMemo(() => {
     const N = Math.ceil(width / pxPerDay);
-    const step = N > 180 ? 14 : N > 90 ? 7 : 1;
+    // Keep labels readable by enforcing a minimum pixel spacing.
+    // Example target: no more than one label per ~40px.
+    const minTickPx = 40;
+    const minStepByPx = Math.max(1, Math.ceil(minTickPx / Math.max(1, pxPerDay)));
+
+    // Coarse heuristic for very long timelines (keeps label count bounded).
+    const coarseStep = N > 180 ? 14 : N > 90 ? 7 : 1;
+
+    const step = Math.max(coarseStep, minStepByPx);
     const out: number[] = [];
     for (let d = 0; d <= N; d += step) out.push(d);
     return out;
@@ -906,12 +980,18 @@ export const GanttChart: React.FC<Props> = ({
   }, [baseUtc, dayCount, unitMode]);
 
   function selectTask(id: string) {
+    setSelectedPhase("");
+    setPhaseMeta(null);
+    setPhaseMetaErr("");
     setSelectedId(id);
     setInfoOpen(true);
   }
 
   function clearSelection() {
     setSelectedId("");
+    setSelectedPhase("");
+    setPhaseMeta(null);
+    setPhaseMetaErr("");
     setInfoOpen(false);
   }
 
@@ -929,7 +1009,7 @@ export const GanttChart: React.FC<Props> = ({
   const infoPanelMaxWidth = 1040;
   const infoPanelInset = 20;
   const taskListWidth = 360;
-  const headerHeight = 112;
+  const headerHeight = hideHeader ? 0 : 112;
 
   const linearAxisRowIdx = useMemo(() => {
     // In phase summary mode, the first row is the project header; axis should live there.
@@ -983,9 +1063,133 @@ export const GanttChart: React.FC<Props> = ({
         minWidth: 0,
       }}
       ref={rootRef}
+      data-kanlytics-gantt-export-root
+      data-kanlytics-gantt-export-id={exportId || ""}
     >
+      {editPhaseOpen ? (
+        <div
+          className="modalBackdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Edit phase"
+          onClick={() => setEditPhaseOpen(false)}
+        >
+          <div
+            className="modalCard"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 920, maxHeight: "calc(100vh - 36px)", overflow: "auto" }}
+          >
+            <div className="modalHeader">
+              <div>Edit phase</div>
+              <button
+                type="button"
+                onClick={() => setEditPhaseOpen(false)}
+                style={{ background: "transparent", border: "1px solid var(--border-2)", color: "var(--text)" }}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              <div>
+                <div className="label">Phase</div>
+                <input value={selectedPhase} disabled />
+              </div>
+              <div>
+                <div className="label">Description / notes</div>
+                <div style={{ border: "1px solid var(--border-2)", borderRadius: 10, overflow: "hidden", background: "var(--input-bg)" }}>
+                  <div style={{ display: "flex", borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
+                    <button
+                      type="button"
+                      onClick={() => setEditPhaseTab("write")}
+                      style={{
+                        padding: "8px 10px",
+                        border: "none",
+                        background: editPhaseTab === "write" ? "var(--selected-row-bg)" : "transparent",
+                        color: "var(--text)",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                      }}
+                    >
+                      Write
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditPhaseTab("preview")}
+                      style={{
+                        padding: "8px 10px",
+                        border: "none",
+                        background: editPhaseTab === "preview" ? "var(--selected-row-bg)" : "transparent",
+                        color: "var(--text)",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                      }}
+                    >
+                      Preview
+                    </button>
+                  </div>
+                  {editPhaseTab === "write" ? (
+                    <textarea
+                      value={editPhaseDescription}
+                      onChange={(e) => setEditPhaseDescription(e.target.value)}
+                      placeholder="Optional notes for this phase. The task checklist is auto-generated."
+                      style={{
+                        width: "100%",
+                        minHeight: 180,
+                        padding: 10,
+                        border: "none",
+                        outline: "none",
+                        background: "transparent",
+                        color: "var(--text)",
+                        resize: "vertical",
+                      }}
+                    />
+                  ) : (
+                    <div style={{ padding: 10, minHeight: 180, overflow: "auto" }}>
+                      {editPhaseDescription.trim() ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{editPhaseDescription}</ReactMarkdown>
+                      ) : (
+                        <div className="small">Nothing to preview.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="small" style={{ color: "var(--muted-2)" }}>
+                The task checklist section is not editable here and will be regenerated automatically.
+              </div>
+            </div>
+            <div className="modalActions">
+              <button type="button" onClick={() => setEditPhaseOpen(false)} style={{ padding: "10px 12px", borderRadius: 10 }}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!selectedPhase || !onSavePhaseMeta) return;
+                  try {
+                    setPhaseMetaBusy(true);
+                    const meta = await onSavePhaseMeta(selectedPhase, editPhaseDescription);
+                    setPhaseMeta(meta);
+                    setEditPhaseOpen(false);
+                  } catch (e: any) {
+                    setPhaseMetaErr(e?.message || String(e));
+                  } finally {
+                    setPhaseMetaBusy(false);
+                  }
+                }}
+                disabled={!selectedPhase || !onSavePhaseMeta}
+                style={{ padding: "10px 12px", borderRadius: 10 }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="taskList" onClick={clearSelection}>
-        <div className="ganttHeader" style={{ padding: 12, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
+        {!hideHeader ? (
+          <div className="ganttHeader" style={{ padding: 12, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
           <div>
             <div className="label">{phaseSummary ? "Project" : "Phase"}</div>
             {phaseSummary ? (
@@ -1088,6 +1292,7 @@ export const GanttChart: React.FC<Props> = ({
           </div>
           <div style={{ flex: 1 }} />
         </div>
+        ) : null}
 
         <div>
           {phaseSummary
@@ -1142,6 +1347,13 @@ export const GanttChart: React.FC<Props> = ({
                       fontWeight: 600,
                       display: "flex",
                       alignItems: "center",
+                      cursor: onFetchPhaseMeta ? "pointer" : "default",
+                    }}
+                    title={onFetchPhaseMeta ? "Open phase meta issue" : undefined}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!onFetchPhaseMeta) return;
+                      void selectPhase(g.phase);
                     }}
                   >
                     <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1211,29 +1423,31 @@ export const GanttChart: React.FC<Props> = ({
           clearSelection();
         }}
       >
-        <div className="ganttHeader" style={{ padding: 12, minWidth: svgWidth, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
-          <div>
-            {/* Keep vertical alignment with Phase label, but don't show "Search" text */}
-            <div className="label" style={{ visibility: "hidden" }}>
-              Search
+        {!hideHeader ? (
+          <div className="ganttHeader" style={{ padding: 12, minWidth: svgWidth, height: headerHeight, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div>
+              {/* Keep vertical alignment with Phase label, but don't show "Search" text */}
+              <div className="label" style={{ visibility: "hidden" }}>
+                Search
+              </div>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={phaseSummary ? "Phase summary view" : "Filter tasks…"}
+                disabled={phaseSummary}
+              />
             </div>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={phaseSummary ? "Phase summary view" : "Filter tasks…"}
-              disabled={phaseSummary}
-            />
           </div>
-        </div>
+        ) : null}
 
         {/* Centered, inset overlay panel fixed to viewport (does not scroll away). */}
-        {infoOpen ? (
+        {infoOpen && !suppressInfoPanel ? (
           <div
             style={{
               position: "fixed",
               left: panelBounds?.left ?? taskListWidth + 24,
               right: panelBounds?.right ?? 24,
-              top: panelBounds?.top ?? 90,
+              top: panelBounds?.top ?? (hideHeader ? 24 : 90),
               bottom: panelBounds?.bottom ?? 24,
               zIndex: 60,
               pointerEvents: "none",
@@ -1261,48 +1475,74 @@ export const GanttChart: React.FC<Props> = ({
                 <div style={{ padding: 12, borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
                   <div style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: 12 }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 700 }}>Task details</div>
+                      <div style={{ fontWeight: 700 }}>{selectedPhase ? "Phase details" : "Task details"}</div>
                     </div>
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flex: "0 0 auto" }}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!selected) return;
-                          onEditTask?.(selected.id);
-                        }}
-                        disabled={!selected || !onEditTask}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--border-2)",
-                          background: "var(--card)",
-                          color: "var(--text)",
-                          lineHeight: 1,
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!selected) return;
-                          const ok = window.confirm("Delete this task? Dependency references will be removed from other tasks.");
-                          if (!ok) return;
-                          onDeleteTask?.(selected.id);
-                          setInfoOpen(false);
-                        }}
-                        disabled={!selected || !onDeleteTask}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--toast-error-border)",
-                          background: "var(--card)",
-                          color: "var(--toast-error-text)",
-                          lineHeight: 1,
-                        }}
-                      >
-                        Delete
-                      </button>
+                      {selectedPhase ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!selectedPhase) return;
+                            if (!phaseMeta) return;
+                            setEditPhaseDescription(phaseMeta.description || "");
+                            setEditPhaseTab("write");
+                            setEditPhaseOpen(true);
+                          }}
+                          disabled={!selectedPhase || !phaseMeta || !onSavePhaseMeta}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid var(--border-2)",
+                            background: "var(--card)",
+                            color: "var(--text)",
+                            lineHeight: 1,
+                          }}
+                        >
+                          Edit
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!selected) return;
+                              onEditTask?.(selected.id);
+                            }}
+                            disabled={!selected || !onEditTask}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 10,
+                              border: "1px solid var(--border-2)",
+                              background: "var(--card)",
+                              color: "var(--text)",
+                              lineHeight: 1,
+                            }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!selected) return;
+                              const ok = window.confirm("Delete this task? Dependency references will be removed from other tasks.");
+                              if (!ok) return;
+                              onDeleteTask?.(selected.id);
+                              setInfoOpen(false);
+                            }}
+                            disabled={!selected || !onDeleteTask}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 10,
+                              border: "1px solid var(--toast-error-border)",
+                              background: "var(--card)",
+                              color: "var(--toast-error-text)",
+                              lineHeight: 1,
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
                         onClick={() => setInfoOpen(false)}
@@ -1323,7 +1563,43 @@ export const GanttChart: React.FC<Props> = ({
                   </div>
                 </div>
                 <div style={{ padding: 12, overflow: "auto", height: "calc(100% - 62px)" }}>
-                  {!selected ? (
+                  {selectedPhase ? (
+                    <>
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div style={{ display: "grid", gap: 4 }}>
+                          <div className="small" style={{ color: "var(--muted-2)" }}>
+                            Phase
+                          </div>
+                          <div style={{ fontWeight: 700 }}>{selectedPhase}</div>
+                        </div>
+                        {phaseMetaBusy ? <div className="small">Loading phase meta issue…</div> : null}
+                        {phaseMetaErr ? (
+                          <div className="small" style={{ color: "var(--toast-error-text)" }}>
+                            {phaseMetaErr}
+                          </div>
+                        ) : null}
+                        {phaseMeta ? (
+                          <>
+                            {phaseMeta.issue_url ? (
+                              <a href={phaseMeta.issue_url} target="_blank" rel="noreferrer" className="small">
+                                {phaseMeta.issue_url}
+                              </a>
+                            ) : (
+                              <div className="small" style={{ color: "var(--muted-2)" }}>
+                                Draft issue (no URL)
+                              </div>
+                            )}
+                            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{phaseMeta.body || ""}</ReactMarkdown>
+                            </div>
+                            <div className="small" style={{ color: "var(--muted-2)" }}>
+                              Note: the task checklist above is auto-generated and will be overwritten on sync.
+                            </div>
+                          </>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : !selected ? (
                     <div className="small">No task selected.</div>
                   ) : (
                     <>
@@ -1746,6 +2022,7 @@ export const GanttChart: React.FC<Props> = ({
                 return (
                   <g
                     key={`bubble-${b.rowIdx}`}
+                    data-kanlytics-taskbar="1"
                     onClick={(e) => {
                       e.stopPropagation();
                       selectTask(b.repId);
@@ -1784,6 +2061,7 @@ export const GanttChart: React.FC<Props> = ({
             return (
               <g
                 key={t.id}
+                data-kanlytics-taskbar="1"
                 onClick={(e) => {
                   e.stopPropagation();
                   selectTask(t.id);

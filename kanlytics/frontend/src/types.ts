@@ -20,6 +20,7 @@ export type TaskItem = {
   display_task_id?: string | null;
   task_id?: string | null;
   url?: string | null;
+  repo?: string | null;
   number?: number | null;
   state?: string | null;
   labels?: string[];
@@ -69,6 +70,20 @@ export type AppendTaskResponse = { csv_text: string; task_id: string };
 
 export type UpdateTaskResponse = { csv_text: string };
 export type DeleteTaskResponse = { csv_text: string; removed_task_ids: string[] };
+
+export type PhaseMeta = {
+  phase: string;
+  task_id: string;
+  item_id: string;
+  type: string;
+  issue_url?: string | null;
+  title: string;
+  description: string;
+  body: string;
+};
+
+export type GetPhaseMetaResponse = PhaseMeta;
+export type UpdatePhaseMetaResponse = PhaseMeta;
 
 export type ExportProjectResponse = {
   updated_issues: number;

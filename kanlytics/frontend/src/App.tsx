@@ -1,7 +1,25 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { createPlan, schedulePlan, fetchJobStatus, startConnectProject, startExportProject, loadCsvFromPath, saveCsvToPath, saveProject, loadProject, appendTask, updateTask, deleteTask } from "./api";
+import html2canvas from "html2canvas";
+import {
+  createPlan,
+  schedulePlan,
+  fetchJobStatus,
+  startConnectProject,
+  startExportProject,
+  loadCsvFromPath,
+  saveCsvToPath,
+  saveProject,
+  loadProject,
+  appendTask,
+  updateTask,
+  deleteTask,
+  getPhaseMeta,
+  updatePhaseMeta,
+  getPhaseMetaCsv,
+  updatePhaseMetaCsv,
+} from "./api";
 import type { GanttLayout } from "./types";
 import { GanttChart } from "./components/GanttChart";
 import "./styles.css";
@@ -10,6 +28,16 @@ function todayISO(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function parseIsoDateUtc(iso: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((iso || "").trim());
+  if (!m) return null;
+  const yy = Number(m[1]);
+  const mm = Number(m[2]);
+  const dd = Number(m[3]);
+  if (!Number.isFinite(yy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return null;
+  return Date.UTC(yy, mm - 1, dd);
 }
 
 function newProjectId(): string {
@@ -42,6 +70,7 @@ export default function App() {
   const lastScheduleKeyRef = useRef<string>("");
   const suppressAutoScheduleRef = useRef<boolean>(false);
   const toastTimerRef = useRef<number | null>(null);
+  const allProjectsExportRef = useRef<HTMLDivElement | null>(null);
 
   // Sidebar should default to expanded on first load (and on refresh).
   // We intentionally do not persist this preference so the user always lands
@@ -82,6 +111,12 @@ export default function App() {
   const [newProjectNameError, setNewProjectNameError] = useState<string>("");
   const [newProjectStartDate, setNewProjectStartDate] = useState<string>(todayISO());
   const [newProjectWorkingDays, setNewProjectWorkingDays] = useState<boolean>(false);
+  const [newProjectDefaultRepo, setNewProjectDefaultRepo] = useState<string>("");
+  const [newProjectDefaultRepoError, setNewProjectDefaultRepoError] = useState<string>("");
+  const newProjectTemplateFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [newProjectTemplatePath, setNewProjectTemplatePath] = useState<string>("");
+  const [newProjectTemplateCsvText, setNewProjectTemplateCsvText] = useState<string>("");
+  const [newProjectTemplateFileName, setNewProjectTemplateFileName] = useState<string>("");
   const [githubAutoConnect, setGithubAutoConnect] = useState<boolean>(false);
   const [githubAutoExport, setGithubAutoExport] = useState<boolean>(false);
   const [githubAutoExportPlanId, setGithubAutoExportPlanId] = useState<string>("");
@@ -90,6 +125,15 @@ export default function App() {
   const [exportProjectQuery, setExportProjectQuery] = useState<string>("");
   const [exportProjectId, setExportProjectId] = useState<string>("");
   const [exportTarget, setExportTarget] = useState<string>("");
+  const [exportingPng, setExportingPng] = useState<boolean>(false);
+
+  // All Projects multi-view (read-only Gantt charts)
+  const [allProjectsPickerOpen, setAllProjectsPickerOpen] = useState<boolean>(false);
+  const [allProjectsQuery, setAllProjectsQuery] = useState<string>("");
+  const [allProjectsSelectedIds, setAllProjectsSelectedIds] = useState<string[]>([]);
+  const [allProjectsLayoutsById, setAllProjectsLayoutsById] = useState<Record<string, GanttLayout>>({});
+  const [allProjectsScheduleKeyById, setAllProjectsScheduleKeyById] = useState<Record<string, string>>({});
+  const [allProjectsErrorsById, setAllProjectsErrorsById] = useState<Record<string, string>>({});
 
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     try {
@@ -146,6 +190,13 @@ export default function App() {
     "dayCount" | "weeks" | "months" | "calendarDays" | "calendarWeeks" | "calendarMonths"
   >("dayCount");
   const [phaseLayout, setPhaseLayout] = useState<"linear" | "stacked">("stacked");
+  const [multiProjectSharedAxis, setMultiProjectSharedAxis] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("kanlytics.view.multiProjectSharedAxis") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [barPadPx, setBarPadPx] = useState<number>(() => {
     try {
       const raw = window.localStorage.getItem("kanlytics.view.barPadPx");
@@ -183,6 +234,8 @@ export default function App() {
   const [createTaskPhaseMajor, setCreateTaskPhaseMajor] = useState<number | null>(null);
   const [createTaskMode, setCreateTaskMode] = useState<"create" | "edit">("create");
   const [editingTaskId, setEditingTaskId] = useState<string>("");
+  const [createTaskRepo, setCreateTaskRepo] = useState<string>("");
+  const [createTaskRepoError, setCreateTaskRepoError] = useState<string>("");
 
   const [githubModalOpen, setGithubModalOpen] = useState<boolean>(false);
   const [githubModalMode, setGithubModalMode] = useState<"connect" | "export">("connect");
@@ -321,6 +374,14 @@ export default function App() {
     }
   }, [detailMode]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("kanlytics.view.multiProjectSharedAxis", multiProjectSharedAxis ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [multiProjectSharedAxis]);
+
   function showToast(kind: "success" | "error", text: string) {
     if (toastTimerRef.current) {
       window.clearTimeout(toastTimerRef.current);
@@ -347,6 +408,77 @@ export default function App() {
     return projects.find((p) => p.id === activeProjectId) || null;
   }, [projects, activeProjectId]);
 
+  const filteredAllProjects = useMemo(() => {
+    const q = allProjectsQuery.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter((p) => (p.name || "").toLowerCase().includes(q));
+  }, [projects, allProjectsQuery]);
+
+  const allProjectsPickerLabel = useMemo(() => {
+    const sel = allProjectsSelectedIds;
+    if (!sel.length) return "Select projects…";
+    if (sel.length === 1) return projects.find((p) => p.id === sel[0])?.name || "1 project";
+    return `${sel.length} projects`;
+  }, [allProjectsSelectedIds, projects]);
+
+  const allProjectsSelectedIdsSorted = useMemo(() => {
+    const ids = (allProjectsSelectedIds || []).slice();
+    const items = ids
+      .map((id) => {
+        const p = projects.find((x) => x.id === id);
+        const l = allProjectsLayoutsById[id];
+        const sd = parseIsoDateUtc((p?.startDate || "").trim());
+        const metaSd = l ? parseIsoDateUtc(l.meta.project_start) : null;
+        const t = sd ?? metaSd ?? Number.POSITIVE_INFINITY;
+        return { id, t, name: (p?.name || "").toLowerCase() };
+      })
+      .sort((a, b) => (a.t !== b.t ? a.t - b.t : a.name.localeCompare(b.name)));
+    return items.map((x) => x.id);
+  }, [allProjectsSelectedIds, projects, allProjectsLayoutsById]);
+
+  const sharedAxis = useMemo(() => {
+    if (!multiProjectSharedAxis) return null;
+    if (!allProjectsSelectedIds.length) return null;
+    const MS_DAY = 24 * 60 * 60 * 1000;
+
+    let baseUtc: number | null = null;
+    const tasks: { startUtc: number; endUtc: number; w: number }[] = [];
+
+    for (const pid of allProjectsSelectedIdsSorted) {
+      const l = allProjectsLayoutsById[pid];
+      if (!l) continue;
+      const metaBase = parseIsoDateUtc(l.meta.project_start);
+      if (metaBase != null) baseUtc = baseUtc == null ? metaBase : Math.min(baseUtc, metaBase);
+      for (const t of l.tasks || []) {
+        const su = parseIsoDateUtc(t.schedule.start);
+        const eu = parseIsoDateUtc(t.schedule.end);
+        if (su == null || eu == null) continue;
+        baseUtc = baseUtc == null ? su : Math.min(baseUtc, su);
+        tasks.push({ startUtc: su, endUtc: eu, w: t.schedule.w ?? 0 });
+      }
+    }
+
+    if (baseUtc == null) return null;
+
+    let maxEndXDay = 0;
+    for (const it of tasks) {
+      const startDay = Math.max(0, Math.floor((it.startUtc - baseUtc) / MS_DAY));
+      const daySpan = it.w === 0 ? 0 : Math.max(0, Math.floor((it.endUtc - it.startUtc) / MS_DAY) + 1);
+      const endXDay = startDay + Math.max(1, daySpan);
+      maxEndXDay = Math.max(maxEndXDay, endXDay);
+    }
+
+    const iso = new Date(baseUtc).toISOString().slice(0, 10);
+    return { axisBaseDate: iso, axisMaxXDay: maxEndXDay };
+  }, [multiProjectSharedAxis, allProjectsSelectedIdsSorted, allProjectsLayoutsById]);
+
+  useEffect(() => {
+    if (!allProjectsPickerOpen) return;
+    const onDoc = () => setAllProjectsPickerOpen(false);
+    window.addEventListener("click", onDoc);
+    return () => window.removeEventListener("click", onDoc);
+  }, [allProjectsPickerOpen]);
+
   const filteredProjects = useMemo(() => {
     const q = selectProjectQuery.trim().toLowerCase();
     if (!q) return projects;
@@ -368,8 +500,7 @@ export default function App() {
 
   function openExportProjectModal() {
     setExportProjectQuery("");
-    const first = projects[0]?.id || "";
-    setExportProjectId(activeProjectId || first);
+    setExportProjectId(activeProjectId || "");
     setExportTarget("");
     setExportProjectOpen(true);
   }
@@ -475,6 +606,8 @@ export default function App() {
     setCreateTaskPhaseMajor(major);
     setCreateTaskTitle("");
     setCreateTaskTitleError("");
+    setCreateTaskRepo(issueRepo.trim());
+    setCreateTaskRepoError("");
     setCreateTaskBody("");
     setCreateTaskBodyTab("write");
     setCreateTaskAcceptance("");
@@ -492,12 +625,20 @@ export default function App() {
       showToast("error", "Task not found in current layout.");
       return;
     }
+    const repoFromUrl = (() => {
+      const u = String(t.url || "").trim();
+      const m = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/\d+/i.exec(u);
+      if (m) return `${m[1]}/${m[2]}`;
+      return "";
+    })();
     setCreateTaskMode("edit");
     setEditingTaskId(taskId);
     setCreateTaskPhase((t.phase || "").trim());
     setCreateTaskPhaseMajor(null);
     setCreateTaskTitle((t.title || t.name || "").trim());
     setCreateTaskTitleError("");
+    setCreateTaskRepo(String((t as any).repo || "").trim() || repoFromUrl || issueRepo.trim());
+    setCreateTaskRepoError("");
     setCreateTaskBody(String(t.body || t.details || ""));
     setCreateTaskBodyTab("write");
     setCreateTaskAcceptance(String((t as any).acceptance_criteria || ""));
@@ -535,6 +676,11 @@ export default function App() {
       setCreateTaskTitleError("Title is required.");
       return;
     }
+    const repo = createTaskRepo.trim();
+    if (!repo) {
+      setCreateTaskRepoError("Repo is required (owner/repo).");
+      return;
+    }
     if (!createTaskPhase.trim()) {
       showToast("error", "Phase is required.");
       return;
@@ -551,6 +697,7 @@ export default function App() {
         projectName: projectName.trim() || undefined,
         phase: createTaskPhase.trim(),
         title,
+        repo,
         body: createTaskBody,
         acceptanceCriteria: createTaskAcceptance,
         dependencies: createTaskDeps,
@@ -580,6 +727,11 @@ export default function App() {
       setCreateTaskTitleError("Title is required.");
       return;
     }
+    const repo = createTaskRepo.trim();
+    if (!repo) {
+      setCreateTaskRepoError("Repo is required (owner/repo).");
+      return;
+    }
     if (!editingTaskId) {
       showToast("error", "No task selected to edit.");
       return;
@@ -594,6 +746,7 @@ export default function App() {
         csvText,
         taskId: editingTaskId,
         title,
+        repo,
         body: createTaskBody,
         acceptanceCriteria: createTaskAcceptance,
         dependencies: createTaskDeps,
@@ -692,6 +845,71 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    // Drive All Projects multi-view: schedule selected projects in the background.
+    let cancelled = false;
+    const ids = (allProjectsSelectedIds || []).slice();
+    if (ids.length === 0) return;
+
+    void (async () => {
+      for (const pid of ids) {
+        if (cancelled) return;
+        const p = projects.find((x) => x.id === pid);
+        if (!p) continue;
+        const key = JSON.stringify({
+          pid,
+          csvLen: (p.csvText || "").length,
+          startDate: (p.startDate || "").trim(),
+          workingDays: Boolean(p.workingDays),
+          durationMode,
+        });
+        if (allProjectsScheduleKeyById[pid] === key && allProjectsLayoutsById[pid]) continue;
+
+        try {
+          setAllProjectsErrorsById((prev) => ({ ...prev, [pid]: "" }));
+
+          // Ensure we have CSV (load from registry if needed)
+          let csv = String(p.csvText || "");
+          if (!csv.trim() && (p.name || "").trim()) {
+            const loaded = await loadProject((p.name || "").trim());
+            csv = String(loaded.csv_text || "");
+            // cache into project record so we don't reload repeatedly
+            setProjects((prev) => prev.map((x) => (x.id === pid ? { ...x, csvText: csv } : x)));
+          }
+
+          if (!csv.trim()) {
+            setAllProjectsErrorsById((prev) => ({ ...prev, [pid]: "Project has no CSV yet." }));
+            continue;
+          }
+
+          const created = await createPlan(csv, (p.name || "").trim() || undefined);
+          const normalized = created.normalized_csv_text && created.normalized_csv_text.trim() ? created.normalized_csv_text : csv;
+          if (normalized !== csv) {
+            setProjects((prev) => prev.map((x) => (x.id === pid ? { ...x, csvText: normalized } : x)));
+          }
+
+          const scheduled = await schedulePlan({
+            planId: created.plan_id,
+            startDate: (p.startDate || todayISO()).trim(),
+            durationMode,
+            workingDays: Boolean(p.workingDays),
+          });
+          if (cancelled) return;
+          setAllProjectsLayoutsById((prev) => ({ ...prev, [pid]: scheduled.layout }));
+          setAllProjectsScheduleKeyById((prev) => ({ ...prev, [pid]: key }));
+        } catch (e: any) {
+          if (cancelled) return;
+          setAllProjectsErrorsById((prev) => ({ ...prev, [pid]: e?.message || String(e) }));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allProjectsSelectedIds, projects, durationMode]);
+
   function ensureActiveProject(overrides?: Partial<ProjectRecord>): ProjectRecord {
     if (activeProjectId) {
       const existing = projects.find((p) => p.id === activeProjectId);
@@ -757,15 +975,23 @@ export default function App() {
     setNewProjectNameError("");
     setNewProjectStartDate(startDate);
     setNewProjectWorkingDays(workingDays);
+    setNewProjectDefaultRepo(issueRepo);
+    setNewProjectDefaultRepoError("");
+    setNewProjectTemplatePath("");
+    setNewProjectTemplateCsvText("");
+    setNewProjectTemplateFileName("");
     setNewProjectOpen(true);
   }
 
-  function createNewProject() {
+  async function createNewProject() {
     const pn = newProjectName.trim();
-    if (!pn) {
-      setNewProjectNameError("Project name is required.");
-      return;
-    }
+    const dr = newProjectDefaultRepo.trim();
+    const pnErr = pn ? "" : "Project name is required.";
+    const drErr = dr ? "" : "Default repo is required (owner/repo).";
+    setNewProjectNameError(pnErr);
+    setNewProjectDefaultRepoError(drErr);
+    if (pnErr || drErr) return;
+
     const id = newProjectId();
     const p: ProjectRecord = {
       id,
@@ -776,7 +1002,7 @@ export default function App() {
       phases: [],
       fileName: "",
       projectUrl: "",
-      issueRepo: "",
+      issueRepo: dr,
     };
 
     setProjects((prev) => [p, ...prev]);
@@ -786,15 +1012,66 @@ export default function App() {
     setStartDate(p.startDate);
     setWorkingDays(p.workingDays);
     setProjectUrl("");
-    setIssueRepo("");
+    setIssueRepo(dr);
     setFileName("");
     setLayout(null);
     setPlanId("");
-    setCsvText("");
+    const emptyCsv = [
+      [
+        "Display Task ID",
+        "Task ID",
+        "url",
+        "repo",
+        "number",
+        "state",
+        "project_name",
+        "phase",
+        "title",
+        "body",
+        "milestone_or_output",
+        "acceptance_criteria",
+        "Dependencies",
+        "start_date",
+        "end_date",
+        "wall_days",
+        "billable_days",
+        "Labels",
+        "Assignees",
+        "notes",
+        "status",
+      ].join(","),
+      "",
+    ].join("\n");
+    setCsvText(emptyCsv);
 
     setNewProjectOpen(false);
     setActivePage("editProject");
-    showToast("success", "Project created. Import a CSV or GitHub URL to load tasks.");
+
+    // Optional template: either chosen from disk (csvText already loaded), or a local path to load.
+    const templatePath = newProjectTemplatePath.trim();
+    const templateInline = newProjectTemplateCsvText;
+    if (templateInline.trim() || templatePath) {
+      try {
+        setBusy(true);
+        let tplText = templateInline;
+        let tplName = newProjectTemplateFileName.trim();
+        if (!tplText.trim() && templatePath) {
+          const res = await loadCsvFromPath(templatePath);
+          tplText = String(res.csv_text || "");
+          tplName = (res.file_name || "").trim() || tplName;
+        }
+        if (tplName) setFileName(tplName);
+        if (tplText.trim()) setCsvText(tplText);
+        showToast("success", "Project created from template.");
+      } catch (e: any) {
+        showToast("error", e?.message || String(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    showToast("success", "Project created.");
   }
 
   function openGithubModal(mode: "connect" | "export") {
@@ -982,10 +1259,10 @@ export default function App() {
   }
 
   async function runExportSelectedProject() {
-    const pid = exportProjectId;
+    const pid = activeProjectId;
     const target = exportTarget.trim();
     if (!pid) {
-      showToast("error", "Select a project to export.");
+      showToast("error", "No active project to export.");
       return;
     }
     if (!target) {
@@ -1042,6 +1319,218 @@ export default function App() {
     } catch (e: any) {
       showToast("error", e?.message || String(e));
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportCurrentGanttAsPng() {
+    if (!activeProjectId) {
+      showToast("error", "No active project to export.");
+      return;
+    }
+    const el = document.querySelector(
+      `[data-kanlytics-gantt-export-root][data-kanlytics-gantt-export-id="${activeProjectId}"]`,
+    ) as HTMLElement | null;
+    if (!el) {
+      showToast("error", "Gantt chart is not available to export yet.");
+      return;
+    }
+    try {
+      setBusy(true);
+      setExportingPng(true);
+      // Give React a tick to hide overlays.
+      await new Promise((r) => window.setTimeout(r, 30));
+
+      // Capture full scrollable width/height by cloning offscreen and expanding scroll containers.
+      const wrapper = document.createElement("div");
+      wrapper.style.position = "fixed";
+      wrapper.style.left = "-100000px";
+      wrapper.style.top = "0";
+      wrapper.style.pointerEvents = "none";
+      wrapper.style.opacity = "0";
+      wrapper.style.background = "transparent";
+
+      const clone = el.cloneNode(true) as HTMLElement;
+      wrapper.appendChild(clone);
+      document.body.appendChild(wrapper);
+
+      // Expand any scroll containers inside the clone.
+      const all = Array.from(clone.querySelectorAll<HTMLElement>("*"));
+      for (const node of all) {
+        // If it scrolls, expand it.
+        const sw = node.scrollWidth;
+        const sh = node.scrollHeight;
+        if (sw > node.clientWidth + 1) node.style.width = `${sw}px`;
+        if (sh > node.clientHeight + 1) node.style.height = `${sh}px`;
+        const cs = window.getComputedStyle(node);
+        if (cs.overflow === "auto" || cs.overflow === "scroll") node.style.overflow = "visible";
+        if (cs.overflowX === "auto" || cs.overflowX === "scroll") node.style.overflowX = "visible";
+        if (cs.overflowY === "auto" || cs.overflowY === "scroll") node.style.overflowY = "visible";
+      }
+
+      // Size wrapper to the clone's content.
+      const fullW = Math.max(clone.scrollWidth, el.scrollWidth, el.clientWidth);
+      const fullH = Math.max(clone.scrollHeight, el.scrollHeight, el.clientHeight);
+
+      // Crop the right side to ~one tick beyond the right-most task bar.
+      let captureW = fullW;
+      try {
+        const rootRect = clone.getBoundingClientRect();
+        let maxRight = 0;
+        const bars = Array.from(clone.querySelectorAll<HTMLElement>('[data-kanlytics-taskbar="1"]'));
+        for (const b of bars) {
+          const r = b.getBoundingClientRect();
+          maxRight = Math.max(maxRight, r.right - rootRect.left);
+        }
+        if (maxRight > 0) {
+          const tickPx = Math.max(40, pxPerDay); // one label interval minimum
+          captureW = Math.min(fullW, Math.ceil(maxRight + tickPx + 20));
+        }
+      } catch {
+        // ignore crop failures; fall back to full width
+      }
+      wrapper.style.width = `${fullW}px`;
+      wrapper.style.height = `${fullH}px`;
+      clone.style.width = `${fullW}px`;
+
+      // Keep canvas dimensions in check for very large exports.
+      const maxCanvasDim = 16000;
+      const scale = Math.min(2, Math.max(0.5, maxCanvasDim / Math.max(1, fullW)));
+
+      const canvas = await html2canvas(clone, {
+        backgroundColor: null,
+        scale,
+        useCORS: true,
+        logging: false,
+        width: captureW,
+        height: fullH,
+        windowWidth: captureW,
+        windowHeight: fullH,
+      });
+      wrapper.remove();
+      const dataUrl = canvas.toDataURL("image/png");
+      const name = (activeProject?.name || projectName || "gantt").trim().replace(/[^\w\- ]+/g, "_");
+      const fname = `${name || "gantt"}.png`;
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setExportProjectOpen(false);
+      showToast("success", "Exported PNG.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setExportingPng(false);
+      setBusy(false);
+    }
+  }
+
+  async function exportJointProjectViewAsPng() {
+    if (!allProjectsSelectedIds.length) {
+      showToast("error", "Select one or more projects to export.");
+      return;
+    }
+    const el = allProjectsExportRef.current;
+    if (!el) {
+      showToast("error", "Project view is not available to export yet.");
+      return;
+    }
+    try {
+      setBusy(true);
+      setExportingPng(true);
+      setAllProjectsPickerOpen(false);
+      await new Promise((r) => window.setTimeout(r, 30));
+
+      const wrapper = document.createElement("div");
+      wrapper.style.position = "fixed";
+      wrapper.style.left = "-100000px";
+      wrapper.style.top = "0";
+      wrapper.style.pointerEvents = "none";
+      wrapper.style.opacity = "0";
+      wrapper.style.background = "transparent";
+
+      const clone = el.cloneNode(true) as HTMLElement;
+      // Force a vertical layout in the exported image (top-to-bottom),
+      // regardless of the responsive grid used on-screen.
+      clone.style.display = "flex";
+      clone.style.flexDirection = "column";
+      clone.style.gap = "12px";
+      clone.style.alignItems = "stretch";
+      // Ensure children don't try to "grid" themselves.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (clone.style as any).gridTemplateColumns = "";
+      wrapper.appendChild(clone);
+      document.body.appendChild(wrapper);
+
+      const all = Array.from(clone.querySelectorAll<HTMLElement>("*"));
+      for (const node of all) {
+        const sw = node.scrollWidth;
+        const sh = node.scrollHeight;
+        if (sw > node.clientWidth + 1) node.style.width = `${sw}px`;
+        if (sh > node.clientHeight + 1) node.style.height = `${sh}px`;
+        const cs = window.getComputedStyle(node);
+        if (cs.overflow === "auto" || cs.overflow === "scroll") node.style.overflow = "visible";
+        if (cs.overflowX === "auto" || cs.overflowX === "scroll") node.style.overflowX = "visible";
+        if (cs.overflowY === "auto" || cs.overflowY === "scroll") node.style.overflowY = "visible";
+      }
+
+      // After forcing column layout, compute width as the maximum child width.
+      let childMaxW = 0;
+      for (const child of Array.from(clone.children) as HTMLElement[]) {
+        childMaxW = Math.max(childMaxW, child.scrollWidth, child.clientWidth);
+        child.style.width = "100%";
+      }
+      const fullW = Math.max(childMaxW, clone.scrollWidth, el.scrollWidth, el.clientWidth);
+      const fullH = Math.max(clone.scrollHeight, el.scrollHeight, el.clientHeight);
+      let captureW = fullW;
+      try {
+        const rootRect = clone.getBoundingClientRect();
+        let maxRight = 0;
+        const bars = Array.from(clone.querySelectorAll<HTMLElement>('[data-kanlytics-taskbar="1"]'));
+        for (const b of bars) {
+          const r = b.getBoundingClientRect();
+          maxRight = Math.max(maxRight, r.right - rootRect.left);
+        }
+        if (maxRight > 0) {
+          const tickPx = Math.max(40, pxPerDay);
+          captureW = Math.min(fullW, Math.ceil(maxRight + tickPx + 20));
+        }
+      } catch {
+        // ignore
+      }
+      wrapper.style.width = `${fullW}px`;
+      wrapper.style.height = `${fullH}px`;
+      clone.style.width = `${fullW}px`;
+
+      const maxCanvasDim = 16000;
+      const scale = Math.min(2, Math.max(0.5, maxCanvasDim / Math.max(1, fullW)));
+
+      const canvas = await html2canvas(clone, {
+        backgroundColor: null,
+        scale,
+        useCORS: true,
+        logging: false,
+        width: captureW,
+        height: fullH,
+        windowWidth: captureW,
+        windowHeight: fullH,
+      });
+      wrapper.remove();
+      const dataUrl = canvas.toDataURL("image/png");
+      const fname = `projects-${allProjectsSelectedIds.length}.png`;
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      showToast("success", "Exported PNG.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setExportingPng(false);
       setBusy(false);
     }
   }
@@ -1289,16 +1778,6 @@ export default function App() {
           >
             {!navCollapsed ? "Import Project" : "Import"}
           </button>
-          <button
-            type="button"
-            className="navItem"
-            onClick={() => {
-              openExportProjectModal();
-            }}
-            title="Export Project"
-          >
-            {!navCollapsed ? "Export Project" : "Export"}
-          </button>
           <button type="button" className="navItem" onClick={() => setViewOptionsModalOpen(true)} title="View Options">
             {!navCollapsed ? "View Options" : "Options"}
           </button>
@@ -1343,6 +1822,9 @@ export default function App() {
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <button type="button" onClick={() => void saveCurrentProject()} disabled={busy || !csvText.trim()} style={secondaryButtonStyle}>
               Save
+            </button>
+            <button type="button" onClick={openExportProjectModal} disabled={busy} style={secondaryButtonStyle}>
+              Export
             </button>
           </div>
         </div>
@@ -1411,6 +1893,7 @@ export default function App() {
                 <div className="ganttShell">
                   <GanttChart
                     layout={layout}
+                    exportId={activeProjectId}
                     pxPerDay={pxPerDay}
                     rowHeight={28}
                     showDeps={showDeps}
@@ -1421,6 +1904,7 @@ export default function App() {
                     barPadPx={barPadPx}
                     projectName={projectName}
                     detailMode={detailMode}
+                    suppressInfoPanel={exportingPng}
                     phaseFilter={phaseFilter}
                     onPhaseFilterChange={setPhaseFilter}
                     extraPhases={activeProject?.phases || []}
@@ -1432,6 +1916,29 @@ export default function App() {
                     }}
                     onDeleteTask={(taskId) => {
                       void deleteTaskAndReschedule(taskId);
+                    }}
+                    onFetchPhaseMeta={async (phase) => {
+                      const repo = (issueRepo || "").trim();
+                      if (!repo) throw new Error("No default repo set for this project.");
+                      const pn = (activeProject?.name || projectName || "").trim() || "Project";
+                      if (projectUrl.trim()) {
+                        return await getPhaseMeta({ projectUrl: projectUrl.trim(), phase, issueRepo: repo });
+                      }
+                      return await getPhaseMetaCsv({ repo, projectName: pn, csvText, phase });
+                    }}
+                    onSavePhaseMeta={async (phase, description) => {
+                      const repo = (issueRepo || "").trim();
+                      if (!repo) throw new Error("No default repo set for this project.");
+                      const pn = (activeProject?.name || projectName || "").trim() || "Project";
+                      if (projectUrl.trim()) {
+                        return await updatePhaseMeta({
+                          projectUrl: projectUrl.trim(),
+                          phase,
+                          description,
+                          issueRepo: repo,
+                        });
+                      }
+                      return await updatePhaseMetaCsv({ repo, projectName: pn, csvText, phase, description });
                     }}
                   />
                 </div>
@@ -1508,6 +2015,191 @@ export default function App() {
                     );
                   })}
                 </div>
+              )}
+            </div>
+
+            <div className="card" style={{ marginTop: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>Project View</div>
+                <button
+                  type="button"
+                  style={secondaryButtonStyle}
+                  onClick={() => void exportJointProjectViewAsPng()}
+                  disabled={busy || allProjectsSelectedIds.length === 0}
+                  title="Export the combined view as PNG"
+                >
+                  Export PNG
+                </button>
+              </div>
+              {projects.length === 0 ? (
+                <div className="small">No projects to show yet.</div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <div style={{ position: "relative", minWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={() => setAllProjectsPickerOpen((v) => !v)}
+                        style={{
+                          width: "100%",
+                          height: 44,
+                          padding: "10px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--border-2)",
+                          background: "var(--input-bg)",
+                          color: "var(--text)",
+                          textAlign: "left",
+                          cursor: "pointer",
+                        }}
+                        title={allProjectsPickerLabel}
+                      >
+                        {allProjectsPickerLabel}
+                      </button>
+                      {allProjectsPickerOpen ? (
+                        <div
+                          style={{
+                            position: "absolute",
+                            zIndex: 10,
+                            top: 48,
+                            left: 0,
+                            right: 0,
+                            background: "var(--card)",
+                            border: "1px solid var(--border)",
+                            borderRadius: 12,
+                            padding: 10,
+                            boxShadow: "0 12px 30px rgba(0,0,0,0.12)",
+                            maxHeight: 320,
+                            overflow: "auto",
+                          }}
+                        >
+                          <div className="label" style={{ marginBottom: 6 }}>
+                            Filter
+                          </div>
+                          <input value={allProjectsQuery} onChange={(e) => setAllProjectsQuery(e.target.value)} placeholder="Type to filter projects…" />
+                          <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+                            <button
+                              type="button"
+                              style={secondaryButtonStyle}
+                              onClick={() => setAllProjectsSelectedIds(projects.map((p) => p.id))}
+                            >
+                              Select all
+                            </button>
+                            <button type="button" style={secondaryButtonStyle} onClick={() => setAllProjectsSelectedIds([])}>
+                              Clear
+                            </button>
+                          </div>
+                          <div style={{ height: 1, background: "var(--border)", margin: "10px 0" }} />
+                          {filteredAllProjects.map((p) => {
+                            const checked = allProjectsSelectedIds.includes(p.id);
+                            return (
+                              <label key={p.id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "6px 6px", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => {
+                                    setAllProjectsSelectedIds((prev) => {
+                                      const next = prev.slice();
+                                      const idx = next.indexOf(p.id);
+                                      if (idx >= 0) next.splice(idx, 1);
+                                      else next.push(p.id);
+                                      return next;
+                                    });
+                                  }}
+                                />
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name || "(untitled)"}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {allProjectsSelectedIds.length === 0 ? (
+                    <div className="small" style={{ marginTop: 10 }}>
+                      Select one or more projects to render their Gantt charts below.
+                    </div>
+                  ) : (
+                    <div
+                      ref={allProjectsExportRef}
+                      style={{
+                        display: "grid",
+                        gap: 12,
+                        marginTop: 12,
+                        gridTemplateColumns: "repeat(auto-fit, minmax(860px, 1fr))",
+                        alignItems: "start",
+                      }}
+                    >
+                      {allProjectsSelectedIdsSorted.map((pid) => {
+                        const p = projects.find((x) => x.id === pid);
+                        if (!p) return null;
+                        const layout = allProjectsLayoutsById[pid];
+                        const err = allProjectsErrorsById[pid];
+                        return (
+                          <div key={pid} style={{ minWidth: 0 }}>
+                            {/* Don't duplicate the project title here; the chart's "Project" row already shows it. */}
+                            {err ? (
+                              <div className="small" style={{ marginTop: 8, color: "var(--toast-error-text)" }}>
+                                {err}
+                              </div>
+                            ) : null}
+                            {!layout ? (
+                              <div className="small" style={{ marginTop: 8 }}>
+                                Loading…
+                              </div>
+                            ) : (
+                              <div className="ganttShell" style={{ marginTop: 8 }}>
+                                <GanttChart
+                                  layout={layout}
+                                  exportId={pid}
+                                  pxPerDay={pxPerDay}
+                                  rowHeight={28}
+                                  showDeps={showDeps}
+                                  showDailyGrid={showDailyGrid}
+                                  showCriticalPath={showCriticalPath}
+                                  timeAxisMode={timeAxisMode}
+                                  phaseLayout={phaseLayout}
+                                  barPadPx={barPadPx}
+                                  projectName={p.name}
+                                  detailMode={detailMode}
+                                  suppressInfoPanel={exportingPng}
+                                  hideHeader={true}
+                                  axisBaseDate={sharedAxis?.axisBaseDate}
+                                  axisMaxXDay={sharedAxis?.axisMaxXDay}
+                                  onFetchPhaseMeta={async (phase) => {
+                                    const repo = (p.issueRepo || "").trim();
+                                    if (!repo) throw new Error("No default repo set for this project.");
+                                    const pn = (p.name || "").trim() || "Project";
+                                    const csv = String((projects.find((x) => x.id === pid)?.csvText || "") ?? "");
+                                    if ((p.projectUrl || "").trim()) {
+                                      return await getPhaseMeta({ projectUrl: (p.projectUrl || "").trim(), phase, issueRepo: repo });
+                                    }
+                                    return await getPhaseMetaCsv({ repo, projectName: pn, csvText: csv, phase });
+                                  }}
+                                  onSavePhaseMeta={async (phase, description) => {
+                                    const repo = (p.issueRepo || "").trim();
+                                    if (!repo) throw new Error("No default repo set for this project.");
+                                    const pn = (p.name || "").trim() || "Project";
+                                    const csv = String((projects.find((x) => x.id === pid)?.csvText || "") ?? "");
+                                    if ((p.projectUrl || "").trim()) {
+                                      return await updatePhaseMeta({
+                                        projectUrl: (p.projectUrl || "").trim(),
+                                        phase,
+                                        description,
+                                        issueRepo: repo,
+                                      });
+                                    }
+                                    return await updatePhaseMetaCsv({ repo, projectName: pn, csvText: csv, phase, description });
+                                  }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -1715,18 +2407,8 @@ export default function App() {
               ) : (
                 <div style={{ display: "grid", gap: 12 }}>
                   <div>
-                    <div className="label">Filter</div>
-                    <input value={exportProjectQuery} onChange={(e) => setExportProjectQuery(e.target.value)} placeholder="Type to filter projects…" />
-                  </div>
-                  <div>
                     <div className="label">Project</div>
-                    <select value={exportProjectId} onChange={(e) => setExportProjectId(e.target.value)}>
-                      {filteredExportProjects.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name || "(untitled)"}
-                        </option>
-                      ))}
-                    </select>
+                    <input value={activeProject?.name || ""} disabled placeholder="No active project" />
                   </div>
                   <div>
                     <div className="label">Destination</div>
@@ -1750,10 +2432,13 @@ export default function App() {
                 <button type="button" onClick={() => setExportProjectOpen(false)} style={secondaryButtonStyle}>
                   Cancel
                 </button>
+                <button type="button" onClick={() => void exportCurrentGanttAsPng()} disabled={busy || !layout} style={secondaryButtonStyle}>
+                  PNG
+                </button>
                 <button
                   type="button"
                   onClick={() => void runExportSelectedProject()}
-                  disabled={busy || !exportProjectId || !exportTarget.trim()}
+                  disabled={busy || !activeProjectId || !exportTarget.trim()}
                   style={secondaryButtonStyle}
                 >
                   Export
@@ -1898,6 +2583,28 @@ export default function App() {
                         }}
                       />
                     </div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="label">Repo *</div>
+                  <input
+                    value={createTaskRepo}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setCreateTaskRepo(v);
+                      if (createTaskRepoError && v.trim()) setCreateTaskRepoError("");
+                    }}
+                    placeholder="owner/repo (defaults to project default repo)"
+                    style={createTaskRepoError ? { borderColor: "var(--toast-error-border)" } : undefined}
+                  />
+                  {createTaskRepoError ? (
+                    <div className="small" style={{ marginTop: 6, color: "var(--toast-error-text)" }}>
+                      {createTaskRepoError}
+                    </div>
+                  ) : null}
+                  <div className="small" style={{ marginTop: 6, color: "var(--muted-2)" }}>
+                    Used when creating issues on Push. For existing GitHub issues, repo is implied by the issue URL.
                   </div>
                 </div>
 
@@ -2164,13 +2871,80 @@ export default function App() {
                     </select>
                   </div>
                 </div>
+                <div>
+                  <div className="label">Default repo *</div>
+                  <input
+                    value={newProjectDefaultRepo}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setNewProjectDefaultRepo(v);
+                      if (newProjectDefaultRepoError && v.trim()) setNewProjectDefaultRepoError("");
+                    }}
+                    placeholder="owner/repo"
+                    style={newProjectDefaultRepoError ? { borderColor: "var(--toast-error-border)" } : undefined}
+                  />
+                  {newProjectDefaultRepoError ? (
+                    <div className="small" style={{ marginTop: 6, color: "var(--toast-error-text)" }}>
+                      {newProjectDefaultRepoError}
+                    </div>
+                  ) : null}
+                </div>
+                <div>
+                  <div className="label">Template CSV (optional)</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <input
+                      type="file"
+                      ref={newProjectTemplateFileInputRef}
+                      accept=".csv,text/csv"
+                      disabled={busy}
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        void (async () => {
+                          try {
+                            setBusy(true);
+                            const text = await f.text();
+                            setNewProjectTemplateFileName(f.name);
+                            setNewProjectTemplatePath(f.name);
+                            setNewProjectTemplateCsvText(text);
+                          } finally {
+                            setBusy(false);
+                          }
+                        })();
+                      }}
+                    />
+                    <input
+                      value={newProjectTemplatePath}
+                      onChange={(e) => {
+                        setNewProjectTemplatePath(e.target.value);
+                        setNewProjectTemplateCsvText("");
+                        setNewProjectTemplateFileName("");
+                      }}
+                      placeholder="~/path/to/template.csv"
+                      disabled={busy}
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => newProjectTemplateFileInputRef.current?.click()}
+                      disabled={busy}
+                      style={{ ...secondaryButtonStyle, height: 44, paddingTop: 0, paddingBottom: 0 }}
+                    >
+                      Select File
+                    </button>
+                  </div>
+                  <div className="small" style={{ marginTop: 6, color: "var(--muted-2)" }}>
+                    If provided, the project will start with this CSV loaded. Otherwise you’ll start with an empty chart and can add phases/tasks.
+                  </div>
+                </div>
               </div>
 
               <div className="modalActions">
                 <button type="button" onClick={() => setNewProjectOpen(false)} style={secondaryButtonStyle}>
                   Cancel
                 </button>
-                <button type="button" onClick={createNewProject} style={secondaryButtonStyle}>
+                <button type="button" onClick={() => void createNewProject()} style={secondaryButtonStyle} disabled={busy}>
                   Create
                 </button>
               </div>
@@ -2353,6 +3127,17 @@ export default function App() {
                   <select value={showCriticalPath ? "yes" : "no"} onChange={(e) => setShowCriticalPath(e.target.value === "yes")}>
                     <option value="yes">Highlight</option>
                     <option value="no">Off</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div className="label">Multi-project time axis</div>
+                  <select
+                    value={multiProjectSharedAxis ? "shared" : "individual"}
+                    onChange={(e) => setMultiProjectSharedAxis(e.target.value === "shared")}
+                  >
+                    <option value="individual">Individual axes</option>
+                    <option value="shared">Shared axis</option>
                   </select>
                 </div>
 
