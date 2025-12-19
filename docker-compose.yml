@@ -1,0 +1,26 @@
+services:
+  kanlytics:
+    image: kanlytics:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "5173:5173"
+      - "8080:8080"
+    environment:
+      KANLYTICS_FRONTEND_PORT: "5173"
+      KANLYTICS_BACKEND_PORT: "8080"
+      # Optional: override where the PAT secret is mounted
+      # KANLYTICS_GITHUB_PAT_FILE: "/run/secrets/kanlytics_github_pat"
+    secrets:
+      - kanlytics_github_pat
+    volumes:
+      # Persist project registry across restarts
+      - kanlytics_projects:/root/.cache/kanlytics/projects
+
+secrets:
+  kanlytics_github_pat:
+    file: ./secrets/github_pat.txt
+
+volumes:
+  kanlytics_projects:

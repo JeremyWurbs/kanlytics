@@ -1,0 +1,19 @@
+.git
+.venv
+__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Local secrets / config
+kanlytics/core/config.ini
+
+# Frontend artifacts
+kanlytics/frontend/node_modules
+kanlytics/frontend/dist
+
+# OS/editor
+.DS_Store
+.idea
+.vscode

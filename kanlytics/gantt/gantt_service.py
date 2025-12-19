@@ -453,13 +453,25 @@ class GanttService(Service):
         self._jobs: Dict[str, JobStatusOutput] = {}
         self._project_registry = Registry("~/.cache/kanlytics/projects")
 
+        cors_origins_env = os.getenv("KANLYTICS_CORS_ORIGINS", "").strip()
+        if cors_origins_env:
+            cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+        else:
+            cors_origins = [
+                "http://localhost:5173",  # Vite dev server (default)
+                "http://127.0.0.1:5173",
+            ]
+
+        allow_credentials = True
+        if "*" in cors_origins:
+            cors_origins = ["*"]
+            # With wildcard origin, credentials cannot be allowed by browsers.
+            allow_credentials = False
+
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=[
-                "http://localhost:5173",  # Vite dev server
-                "http://127.0.0.1:5173",
-            ],
-            allow_credentials=True,
+            allow_origins=cors_origins,
+            allow_credentials=allow_credentials,
             allow_methods=["*"],
             allow_headers=["*"],
         )

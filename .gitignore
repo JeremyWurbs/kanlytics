@@ -155,6 +155,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local secrets (docker-compose)
+secrets/
+
 # Spyder project settings
 .spyderproject
 .spyproject
