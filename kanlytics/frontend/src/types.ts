@@ -63,6 +63,13 @@ export type SaveCsvPathResponse = { csv_path: string; bytes_written: number };
 
 export type SaveProjectResponse = { project_name: string; registry_name: string };
 
+export type LoadProjectResponse = { project_name: string; registry_name: string; csv_text: string; csv_path: string };
+
+export type AppendTaskResponse = { csv_text: string; task_id: string };
+
+export type UpdateTaskResponse = { csv_text: string };
+export type DeleteTaskResponse = { csv_text: string; removed_task_ids: string[] };
+
 export type ExportProjectResponse = {
   updated_issues: number;
   updated_draft_issues: number;

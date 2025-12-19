@@ -708,14 +708,18 @@ class Gantt:
             s = (t.display_task_id or (str(t.number) if t.number is not None else "")).strip()
         if not s:
             s = task_id
-        parts = s.split(".")
-        key: List[Any] = []
-        for p in parts:
-            if p.isdigit():
-                key.append(int(p))
-            else:
-                key.append(p)
-        return tuple(key)
+        parts = [p for p in s.split(".") if p != ""]
+
+        # Important: Always return a comparable key across tasks.
+        # If we return (3, 2) for "3.2" and ("550e8400-e29b...",) for UUIDs,
+        # Python will raise: TypeError: '<' not supported between instances of 'str' and 'int'
+        #
+        # Strategy:
+        # - Pure numeric dotted identifiers (e.g. "3.2") sort first by numeric tuple.
+        # - Everything else sorts after by lowercase string.
+        if parts and all(p.isdigit() for p in parts):
+            return (0, tuple(int(p) for p in parts), "")
+        return (1, (), s.lower())
 
     @staticmethod
     def _count_days_inclusive(

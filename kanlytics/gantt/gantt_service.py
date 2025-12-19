@@ -134,6 +134,50 @@ class ListProjectsInput(BaseModel):
     pass
 
 
+class AppendTaskInput(BaseModel):
+    csv_text: str = Field(..., description="Current project CSV text (V2).")
+    project_name: Optional[str] = Field(default=None, description="Optional project name to stamp into the new task row.")
+    phase: str = Field(..., description="Phase name for the new task.")
+    title: str = Field(..., description="Task title.")
+    body: Optional[str] = Field(default=None, description="Task description/body (markdown).")
+    acceptance_criteria: Optional[str] = Field(default=None, description="Acceptance criteria (markdown).")
+    dependencies: list[str] = Field(default_factory=list, description="List of dependency Task IDs (UUID strings).")
+    wall_days: float = Field(default=1.0, ge=0.0, description="Wall days duration.")
+    billable_days: float = Field(default=1.0, ge=0.0, description="Billable days duration.")
+    status: Optional[str] = Field(default=None, description="Status column value (Backlog/Planned/In Progress/In Review/Done).")
+    phase_major: Optional[int] = Field(default=None, ge=0, description="Optional major number for phase display IDs (e.g. 6 for 6.1).")
+
+
+class AppendTaskOutput(BaseModel):
+    csv_text: str = Field(..., description="Updated project CSV text with the new task appended.")
+    task_id: str = Field(..., description="Generated Task ID (UUID) for the new task.")
+
+class UpdateTaskInput(BaseModel):
+    csv_text: str = Field(..., description="Current project CSV text (V2).")
+    task_id: str = Field(..., description="Task ID (UUID) to update.")
+    title: Optional[str] = None
+    body: Optional[str] = None
+    acceptance_criteria: Optional[str] = None
+    dependencies: Optional[list[str]] = None
+    wall_days: Optional[float] = Field(default=None, ge=0.0)
+    billable_days: Optional[float] = Field(default=None, ge=0.0)
+    status: Optional[str] = None
+
+
+class UpdateTaskOutput(BaseModel):
+    csv_text: str
+
+
+class DeleteTaskInput(BaseModel):
+    csv_text: str = Field(..., description="Current project CSV text (V2).")
+    task_id: str = Field(..., description="Task ID (UUID) to delete.")
+
+
+class DeleteTaskOutput(BaseModel):
+    csv_text: str
+    removed_task_ids: list[str] = Field(default_factory=list, description="List of removed Task IDs (always includes requested id).")
+
+
 class ConnectProjectInput(BaseModel):
     project_url: str = Field(..., description="GitHub ProjectV2 board URL (e.g. https://github.com/orgs/<org>/projects/<n>).")
 
@@ -240,6 +284,24 @@ list_projects_task = TaskSchema(
     output_schema=ListProjectsOutput,
 )
 
+append_task_task = TaskSchema(
+    name="gantt.append_task",
+    input_schema=AppendTaskInput,
+    output_schema=AppendTaskOutput,
+)
+
+update_task_task = TaskSchema(
+    name="gantt.update_task",
+    input_schema=UpdateTaskInput,
+    output_schema=UpdateTaskOutput,
+)
+
+delete_task_task = TaskSchema(
+    name="gantt.delete_task",
+    input_schema=DeleteTaskInput,
+    output_schema=DeleteTaskOutput,
+)
+
 class CriticalPathInput(BaseModel):
     plan_id: str
 
@@ -321,6 +383,9 @@ class GanttService(Service):
         )
 
         self.add_endpoint("gantt.create_plan", self.create_plan, schema=create_plan_task)
+        self.add_endpoint("gantt.append_task", self.append_task, schema=append_task_task)
+        self.add_endpoint("gantt.update_task", self.update_task, schema=update_task_task)
+        self.add_endpoint("gantt.delete_task", self.delete_task, schema=delete_task_task)
         self.add_endpoint("csv.load_path", self.load_csv_path, schema=load_csv_path_task)
         self.add_endpoint("csv.save_path", self.save_csv_path, schema=save_csv_path_task)
         self.add_endpoint("projects.save", self.save_project, schema=save_project_task)
@@ -463,6 +528,290 @@ class GanttService(Service):
         # Stable display order
         names = sorted(set(names), key=lambda s: s.lower())
         return ListProjectsOutput(project_names=names)
+
+    def append_task(self, payload: AppendTaskInput) -> AppendTaskOutput:
+        """
+        Append a new task row to a V2 CSV (single header row) and return the updated CSV.
+        """
+        import io
+        import csv as _csv
+
+        # Canonical V2 columns (match gantt.export_csv_v2)
+        fieldnames = [
+            "Display Task ID",
+            "Task ID",
+            "url",
+            "number",
+            "state",
+            "project_name",
+            "phase",
+            "title",
+            "body",
+            "milestone_or_output",
+            "acceptance_criteria",
+            "Dependencies",
+            "start_date",
+            "end_date",
+            "wall_days",
+            "billable_days",
+            "Labels",
+            "Assignees",
+            "notes",
+            "status",
+        ]
+
+        text = payload.csv_text or ""
+        buf_in = io.StringIO(text)
+        reader = _csv.DictReader(buf_in)
+        rows: list[dict[str, str]] = []
+        # If the CSV has a header, DictReader.fieldnames will be set; otherwise None.
+        if reader.fieldnames:
+            for r in reader:
+                # Keep blank rows out
+                if r is None:
+                    continue
+                if all(((v or "").strip() == "" for v in r.values())):
+                    continue
+                rows.append({k: (v or "") for k, v in r.items()})
+
+        task_id = str(uuid4())
+        phase = (payload.phase or "").strip()
+        title = (payload.title or "").strip()
+        if not phase:
+            raise ValueError("phase is required.")
+        if not title:
+            raise ValueError("title is required.")
+
+        def parse_display_major_minor(s: str) -> Optional[tuple[int, int]]:
+            s = (s or "").strip()
+            m = __import__("re").match(r"^(\d+)\.(\d+)$", s)
+            if not m:
+                return None
+            return int(m.group(1)), int(m.group(2))
+
+        # Determine the major number for this phase.
+        major = payload.phase_major
+        if major is None:
+            # Best-effort infer from existing rows in same phase.
+            majors: list[int] = []
+            for r in rows:
+                if (r.get("phase") or "").strip() != phase:
+                    continue
+                parsed = parse_display_major_minor(r.get("Display Task ID") or "")
+                if parsed:
+                    majors.append(parsed[0])
+            if majors:
+                major = max(majors)
+            else:
+                # Fallback: pick next major across the whole file.
+                all_majors: list[int] = []
+                for r in rows:
+                    parsed = parse_display_major_minor(r.get("Display Task ID") or "")
+                    if parsed:
+                        all_majors.append(parsed[0])
+                major = (max(all_majors) + 1) if all_majors else 1
+
+        # Determine the next minor number within the phase+major.
+        max_minor = 0
+        for r in rows:
+            if (r.get("phase") or "").strip() != phase:
+                continue
+            parsed = parse_display_major_minor(r.get("Display Task ID") or "")
+            if not parsed:
+                continue
+            mj, mn = parsed
+            if mj == major:
+                max_minor = max(max_minor, mn)
+        display_task_id = f"{major}.{max_minor + 1}"
+
+        status = (payload.status or "").strip() or "Backlog"
+        if status not in STATUS_OPTIONS:
+            status = "Backlog"
+
+        new_row = {
+            "Display Task ID": display_task_id,
+            "Task ID": task_id,
+            "url": "",
+            "number": "",
+            "state": "open",
+            "project_name": (payload.project_name or "").strip(),
+            "phase": phase,
+            "title": title,
+            "body": (payload.body or "").strip(),
+            "milestone_or_output": "",
+            "acceptance_criteria": (payload.acceptance_criteria or "").strip(),
+            "Dependencies": ",".join([d.strip() for d in (payload.dependencies or []) if d.strip()]),
+            "start_date": "",
+            "end_date": "",
+            "wall_days": "" if (payload.wall_days or 0.0) == 0.0 else str(payload.wall_days),
+            "billable_days": "" if (payload.billable_days or 0.0) == 0.0 else str(payload.billable_days),
+            "Labels": "",
+            "Assignees": "",
+            "notes": "",
+            "status": status,
+        }
+
+        rows.append(new_row)
+
+        buf_out = io.StringIO()
+        w = _csv.DictWriter(buf_out, fieldnames=fieldnames, lineterminator="\n")
+        w.writeheader()
+        for r in rows:
+            # Only write known columns; fill missing with blanks.
+            out_r = {k: (r.get(k) or "") for k in fieldnames}
+            w.writerow(out_r)
+        return AppendTaskOutput(csv_text=buf_out.getvalue(), task_id=task_id)
+
+    def update_task(self, payload: UpdateTaskInput) -> UpdateTaskOutput:
+        import io
+        import csv as _csv
+
+        fieldnames = [
+            "Display Task ID",
+            "Task ID",
+            "url",
+            "number",
+            "state",
+            "project_name",
+            "phase",
+            "title",
+            "body",
+            "milestone_or_output",
+            "acceptance_criteria",
+            "Dependencies",
+            "start_date",
+            "end_date",
+            "wall_days",
+            "billable_days",
+            "Labels",
+            "Assignees",
+            "notes",
+            "status",
+        ]
+
+        target_id = (payload.task_id or "").strip()
+        if not target_id:
+            raise ValueError("task_id is required.")
+
+        buf_in = io.StringIO(payload.csv_text or "")
+        reader = _csv.DictReader(buf_in)
+        rows: list[dict[str, str]] = []
+        if reader.fieldnames:
+            for r in reader:
+                if r is None:
+                    continue
+                if all(((v or "").strip() == "" for v in r.values())):
+                    continue
+                rows.append({k: (v or "") for k, v in r.items()})
+
+        found = False
+        for r in rows:
+            if (r.get("Task ID") or "").strip() != target_id:
+                continue
+            found = True
+
+            if payload.title is not None:
+                r["title"] = (payload.title or "").strip()
+            if payload.body is not None:
+                r["body"] = (payload.body or "").strip()
+            if payload.acceptance_criteria is not None:
+                r["acceptance_criteria"] = (payload.acceptance_criteria or "").strip()
+            if payload.dependencies is not None:
+                r["Dependencies"] = ",".join([d.strip() for d in (payload.dependencies or []) if d.strip()])
+            if payload.wall_days is not None:
+                r["wall_days"] = "" if (payload.wall_days or 0.0) == 0.0 else str(payload.wall_days)
+            if payload.billable_days is not None:
+                r["billable_days"] = "" if (payload.billable_days or 0.0) == 0.0 else str(payload.billable_days)
+            if payload.status is not None:
+                status = (payload.status or "").strip() or "Backlog"
+                if status not in STATUS_OPTIONS:
+                    status = "Backlog"
+                r["status"] = status
+
+            break
+
+        if not found:
+            raise ValueError(f"Task ID not found: {target_id}")
+
+        buf_out = io.StringIO()
+        w = _csv.DictWriter(buf_out, fieldnames=fieldnames, lineterminator="\n")
+        w.writeheader()
+        for r in rows:
+            out_r = {k: (r.get(k) or "") for k in fieldnames}
+            w.writerow(out_r)
+        return UpdateTaskOutput(csv_text=buf_out.getvalue())
+
+    def delete_task(self, payload: DeleteTaskInput) -> DeleteTaskOutput:
+        """
+        Delete a task row and remove dependency references to it from other tasks.
+        """
+        import io
+        import csv as _csv
+
+        fieldnames = [
+            "Display Task ID",
+            "Task ID",
+            "url",
+            "number",
+            "state",
+            "project_name",
+            "phase",
+            "title",
+            "body",
+            "milestone_or_output",
+            "acceptance_criteria",
+            "Dependencies",
+            "start_date",
+            "end_date",
+            "wall_days",
+            "billable_days",
+            "Labels",
+            "Assignees",
+            "notes",
+            "status",
+        ]
+
+        target_id = (payload.task_id or "").strip()
+        if not target_id:
+            raise ValueError("task_id is required.")
+
+        buf_in = io.StringIO(payload.csv_text or "")
+        reader = _csv.DictReader(buf_in)
+        rows: list[dict[str, str]] = []
+        if reader.fieldnames:
+            for r in reader:
+                if r is None:
+                    continue
+                if all(((v or "").strip() == "" for v in r.values())):
+                    continue
+                rows.append({k: (v or "") for k, v in r.items()})
+
+        kept: list[dict[str, str]] = []
+        removed: list[str] = []
+        for r in rows:
+            rid = (r.get("Task ID") or "").strip()
+            if rid == target_id:
+                removed.append(rid)
+                continue
+            kept.append(r)
+
+        if not removed:
+            raise ValueError(f"Task ID not found: {target_id}")
+
+        # Remove dependency references to the deleted task.
+        for r in kept:
+            deps = [d.strip() for d in (r.get("Dependencies") or "").split(",") if d.strip()]
+            if target_id in deps:
+                deps = [d for d in deps if d != target_id]
+                r["Dependencies"] = ",".join(deps)
+
+        buf_out = io.StringIO()
+        w = _csv.DictWriter(buf_out, fieldnames=fieldnames, lineterminator="\n")
+        w.writeheader()
+        for r in kept:
+            out_r = {k: (r.get(k) or "") for k in fieldnames}
+            w.writerow(out_r)
+        return DeleteTaskOutput(csv_text=buf_out.getvalue(), removed_task_ids=removed)
 
     def create_plan(self, payload: CreatePlanInput) -> CreatePlanOutput:
         """

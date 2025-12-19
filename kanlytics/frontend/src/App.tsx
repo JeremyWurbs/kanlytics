@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createPlan, schedulePlan, fetchJobStatus, startConnectProject, startExportProject, loadCsvFromPath, saveCsvToPath, saveProject } from "./api";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { createPlan, schedulePlan, fetchJobStatus, startConnectProject, startExportProject, loadCsvFromPath, saveCsvToPath, saveProject, loadProject, appendTask, updateTask, deleteTask } from "./api";
 import type { GanttLayout } from "./types";
 import { GanttChart } from "./components/GanttChart";
 import "./styles.css";
@@ -28,6 +30,8 @@ type ProjectRecord = {
   startDate: string;
   workingDays: boolean;
   csvText: string;
+  phases?: string[];
+  phaseMajors?: Record<string, number>;
   fileName?: string;
   projectUrl?: string;
   issueRepo?: string;
@@ -36,6 +40,7 @@ type ProjectRecord = {
 export default function App() {
   const loadFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastScheduleKeyRef = useRef<string>("");
+  const suppressAutoScheduleRef = useRef<boolean>(false);
   const toastTimerRef = useRef<number | null>(null);
 
   // Sidebar should default to expanded on first load (and on refresh).
@@ -74,6 +79,7 @@ export default function App() {
   const [importProjectValue, setImportProjectValue] = useState<string>("");
   const [newProjectOpen, setNewProjectOpen] = useState<boolean>(false);
   const [newProjectName, setNewProjectName] = useState<string>("");
+  const [newProjectNameError, setNewProjectNameError] = useState<string>("");
   const [newProjectStartDate, setNewProjectStartDate] = useState<string>(todayISO());
   const [newProjectWorkingDays, setNewProjectWorkingDays] = useState<boolean>(false);
   const [githubAutoConnect, setGithubAutoConnect] = useState<boolean>(false);
@@ -156,6 +162,27 @@ export default function App() {
   const [busy, setBusy] = useState<boolean>(false);
   const [msg, setMsg] = useState<string>("");
   const [err, setErr] = useState<string>("");
+
+  const [phaseFilter, setPhaseFilter] = useState<string[]>([]);
+  const [addPhaseOpen, setAddPhaseOpen] = useState<boolean>(false);
+  const [addPhaseName, setAddPhaseName] = useState<string>("");
+  const [addPhaseError, setAddPhaseError] = useState<string>("");
+
+  const [createTaskOpen, setCreateTaskOpen] = useState<boolean>(false);
+  const [createTaskPhase, setCreateTaskPhase] = useState<string>("");
+  const [createTaskTitle, setCreateTaskTitle] = useState<string>("");
+  const [createTaskTitleError, setCreateTaskTitleError] = useState<string>("");
+  const [createTaskBody, setCreateTaskBody] = useState<string>("");
+  const [createTaskBodyTab, setCreateTaskBodyTab] = useState<"write" | "preview">("write");
+  const [createTaskAcceptance, setCreateTaskAcceptance] = useState<string>("");
+  const [createTaskAcceptanceTab, setCreateTaskAcceptanceTab] = useState<"write" | "preview">("write");
+  const [createTaskWallDays, setCreateTaskWallDays] = useState<number>(1);
+  const [createTaskBillableDays, setCreateTaskBillableDays] = useState<number>(1);
+  const [createTaskDepQuery, setCreateTaskDepQuery] = useState<string>("");
+  const [createTaskDeps, setCreateTaskDeps] = useState<string[]>([]);
+  const [createTaskPhaseMajor, setCreateTaskPhaseMajor] = useState<number | null>(null);
+  const [createTaskMode, setCreateTaskMode] = useState<"create" | "edit">("create");
+  const [editingTaskId, setEditingTaskId] = useState<string>("");
 
   const [githubModalOpen, setGithubModalOpen] = useState<boolean>(false);
   const [githubModalMode, setGithubModalMode] = useState<"connect" | "export">("connect");
@@ -347,20 +374,322 @@ export default function App() {
     setExportProjectOpen(true);
   }
 
-  function loadProjectById(pid: string) {
+  function openAddPhaseModal() {
+    setAddPhaseName("");
+    setAddPhaseError("");
+    setAddPhaseOpen(true);
+  }
+
+  function nextPhaseMajor(): number {
+    let maxMajor = 0;
+
+    const p = activeProjectId ? projects.find((x) => x.id === activeProjectId) : null;
+    const majors = p?.phaseMajors || {};
+    for (const v of Object.values(majors)) {
+      if (typeof v === "number" && Number.isFinite(v)) maxMajor = Math.max(maxMajor, v);
+    }
+
+    // Also consider majors inferred from existing task display IDs.
+    for (const t of layout?.tasks || []) {
+      const disp = String((t.display_id || t.display_task_id || "") ?? "").trim();
+      const m = /^(\d+)\.(\d+)$/.exec(disp);
+      if (m) maxMajor = Math.max(maxMajor, Number(m[1]));
+    }
+
+    return maxMajor + 1;
+  }
+
+  function inferPhaseMajorMapFromTasks(): Record<string, number> {
+    const byPhaseCounts = new Map<string, Map<number, number>>();
+    for (const t of layout?.tasks || []) {
+      const phase = (t.phase || "").trim();
+      if (!phase) continue;
+      const disp = String((t.display_id || t.display_task_id || "") ?? "").trim();
+      const m = /^(\d+)\.(\d+)$/.exec(disp);
+      if (!m) continue;
+      const major = Number(m[1]);
+      if (!Number.isFinite(major)) continue;
+      if (!byPhaseCounts.has(phase)) byPhaseCounts.set(phase, new Map());
+      const inner = byPhaseCounts.get(phase)!;
+      inner.set(major, (inner.get(major) || 0) + 1);
+    }
+    const out: Record<string, number> = {};
+    for (const [phase, counts] of byPhaseCounts.entries()) {
+      // choose the most frequent major for that phase, tie -> smallest major
+      let bestMajor = 0;
+      let bestCount = -1;
+      for (const [major, count] of counts.entries()) {
+        if (count > bestCount || (count === bestCount && major < bestMajor)) {
+          bestMajor = major;
+          bestCount = count;
+        }
+      }
+      if (bestCount >= 0) out[phase] = bestMajor;
+    }
+    return out;
+  }
+
+  function createPhase() {
+    const name = addPhaseName.trim();
+    if (!name) {
+      setAddPhaseError("Phase name is required.");
+      return;
+    }
+
+    if (!activeProjectId) {
+      showToast("error", "No project selected.");
+      return;
+    }
+
+    const existing = new Set<string>();
+    const p = projects.find((x) => x.id === activeProjectId);
+    for (const ph of p?.phases || []) existing.add(ph.toLowerCase());
+    for (const t of (layout?.tasks || [])) existing.add((t.phase || "Unphased").toLowerCase());
+    if (existing.has(name.toLowerCase())) {
+      setAddPhaseError("A phase with this name already exists.");
+      return;
+    }
+
+    setProjects((prev) =>
+      prev.map((x) => {
+        if (x.id !== activeProjectId) return x;
+        const cur = Array.isArray(x.phases) ? x.phases : [];
+        const inferred = inferPhaseMajorMapFromTasks();
+        const phaseMajors = { ...(x.phaseMajors || {}), ...inferred };
+        if (phaseMajors[name] == null) phaseMajors[name] = nextPhaseMajor();
+        return { ...x, phases: [...cur, name], phaseMajors };
+      }),
+    );
+    setPhaseFilter((prev) => (prev.length === 0 ? [name] : Array.from(new Set([...prev, name]))));
+    setAddPhaseOpen(false);
+  }
+
+  function openCreateTaskModal(phase: string) {
+    setCreateTaskMode("create");
+    setEditingTaskId("");
+    setCreateTaskPhase(phase);
+    // Resolve major for this phase (existing mapping or inferred from tasks).
+    const p = activeProjectId ? projects.find((x) => x.id === activeProjectId) : null;
+    const inferred = inferPhaseMajorMapFromTasks();
+    const major = (p?.phaseMajors && p.phaseMajors[phase] != null ? p.phaseMajors[phase] : inferred[phase]) ?? null;
+    setCreateTaskPhaseMajor(major);
+    setCreateTaskTitle("");
+    setCreateTaskTitleError("");
+    setCreateTaskBody("");
+    setCreateTaskBodyTab("write");
+    setCreateTaskAcceptance("");
+    setCreateTaskAcceptanceTab("write");
+    setCreateTaskWallDays(1);
+    setCreateTaskBillableDays(1);
+    setCreateTaskDepQuery("");
+    setCreateTaskDeps([]);
+    setCreateTaskOpen(true);
+  }
+
+  function openEditTaskModal(taskId: string) {
+    const t = (layout?.tasks || []).find((x) => x.id === taskId);
+    if (!t) {
+      showToast("error", "Task not found in current layout.");
+      return;
+    }
+    setCreateTaskMode("edit");
+    setEditingTaskId(taskId);
+    setCreateTaskPhase((t.phase || "").trim());
+    setCreateTaskPhaseMajor(null);
+    setCreateTaskTitle((t.title || t.name || "").trim());
+    setCreateTaskTitleError("");
+    setCreateTaskBody(String(t.body || t.details || ""));
+    setCreateTaskBodyTab("write");
+    setCreateTaskAcceptance(String((t as any).acceptance_criteria || ""));
+    setCreateTaskAcceptanceTab("write");
+    setCreateTaskWallDays(Number((t.durations?.wall ?? 1) as any) || 1);
+    setCreateTaskBillableDays(Number((t.durations?.billable ?? 1) as any) || 1);
+    setCreateTaskDepQuery("");
+    setCreateTaskDeps(Array.isArray(t.dependencies) ? t.dependencies.slice() : []);
+    setCreateTaskOpen(true);
+  }
+
+  const dependencyCandidates = useMemo(() => {
+    const tasks = layout?.tasks || [];
+    const q = createTaskDepQuery.trim().toLowerCase();
+    return tasks
+      .filter((t) => (t.id || "").trim() !== "")
+      .filter((t) => {
+        if (!q) return true;
+        const key = t.display_id || t.display_task_id || t.id;
+        const hay = `${key} ${t.title || t.name} ${(t.phase || "").trim()}`.toLowerCase();
+        return hay.includes(q);
+      })
+      .slice()
+      .sort((a, b) => {
+        const ap = (a.phase || "").toLowerCase();
+        const bp = (b.phase || "").toLowerCase();
+        if (ap !== bp) return ap.localeCompare(bp);
+        return (a.schedule?.row ?? 0) - (b.schedule?.row ?? 0);
+      });
+  }, [layout?.tasks, createTaskDepQuery]);
+
+  async function createTask() {
+    const title = createTaskTitle.trim();
+    if (!title) {
+      setCreateTaskTitleError("Title is required.");
+      return;
+    }
+    if (!createTaskPhase.trim()) {
+      showToast("error", "Phase is required.");
+      return;
+    }
+    if (!csvText.trim()) {
+      showToast("error", "No project CSV loaded.");
+      return;
+    }
+
+    try {
+      setBusy(true);
+      const res = await appendTask({
+        csvText,
+        projectName: projectName.trim() || undefined,
+        phase: createTaskPhase.trim(),
+        title,
+        body: createTaskBody,
+        acceptanceCriteria: createTaskAcceptance,
+        dependencies: createTaskDeps,
+        wallDays: Number.isFinite(createTaskWallDays) ? createTaskWallDays : 1,
+        billableDays: Number.isFinite(createTaskBillableDays) ? createTaskBillableDays : 1,
+        phaseMajor: createTaskPhaseMajor ?? undefined,
+      });
+      const nextCsv = String(res.csv_text || "");
+      setCsvText(nextCsv);
+      if (activeProjectId) {
+        setProjects((prev) => prev.map((p) => (p.id === activeProjectId ? { ...p, csvText: nextCsv } : p)));
+      }
+      // Ensure the phase is visible in the current filter.
+      setPhaseFilter((prev) => (prev.length === 0 ? [createTaskPhase] : Array.from(new Set([...prev, createTaskPhase]))));
+      setCreateTaskOpen(false);
+      showToast("success", "Task created.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveEditedTask() {
+    const title = createTaskTitle.trim();
+    if (!title) {
+      setCreateTaskTitleError("Title is required.");
+      return;
+    }
+    if (!editingTaskId) {
+      showToast("error", "No task selected to edit.");
+      return;
+    }
+    if (!csvText.trim()) {
+      showToast("error", "No project CSV loaded.");
+      return;
+    }
+    try {
+      setBusy(true);
+      const res = await updateTask({
+        csvText,
+        taskId: editingTaskId,
+        title,
+        body: createTaskBody,
+        acceptanceCriteria: createTaskAcceptance,
+        dependencies: createTaskDeps,
+        wallDays: Number.isFinite(createTaskWallDays) ? createTaskWallDays : 1,
+        billableDays: Number.isFinite(createTaskBillableDays) ? createTaskBillableDays : 1,
+      });
+      const nextCsv = String(res.csv_text || "");
+      setCsvText(nextCsv);
+      if (activeProjectId) setProjects((prev) => prev.map((p) => (p.id === activeProjectId ? { ...p, csvText: nextCsv } : p)));
+      setCreateTaskOpen(false);
+      showToast("success", "Task updated.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteTaskAndReschedule(taskId: string) {
+    if (!csvText.trim()) {
+      showToast("error", "No project CSV loaded.");
+      return;
+    }
+    try {
+      setBusy(true);
+      const res = await deleteTask({ csvText, taskId });
+      const nextCsv = String(res.csv_text || "");
+      setCsvText(nextCsv);
+      if (activeProjectId) setProjects((prev) => prev.map((p) => (p.id === activeProjectId ? { ...p, csvText: nextCsv } : p)));
+      showToast("success", "Task deleted (dependency references removed).");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openProjectById(pid: string) {
     const p = projects.find((x) => x.id === pid);
     if (!p) return;
+
+    // Hydrate base project info immediately.
     setActiveProjectId(p.id);
     setProjectName(p.name || "");
-    setStartDate((p.startDate || todayISO()).trim());
+    const sd = (p.startDate || todayISO()).trim();
+    setStartDate(sd);
     setWorkingDays(Boolean(p.workingDays));
     setProjectUrl(p.projectUrl || "");
     setIssueRepo(p.issueRepo || "");
     setFileName(p.fileName || "");
+    setActivePage("editProject");
+
+    // We'll drive scheduling manually; don't rely on the csvText-change auto effect.
+    suppressAutoScheduleRef.current = true;
     setLayout(null);
     setPlanId("");
-    setCsvText(p.csvText || "");
-    setActivePage("editProject");
+
+    try {
+      setBusy(true);
+
+      let csv = String(p.csvText || "");
+      if (!csv.trim()) {
+        const name = (p.name || "").trim();
+        if (!name) throw new Error("Project has no name; cannot load from registry.");
+        const loaded = await loadProject(name);
+        csv = String(loaded.csv_text || "");
+        setProjects((prev) => prev.map((x) => (x.id === p.id ? { ...x, csvText: csv } : x)));
+      }
+
+      // Normalize/schedule now so the user doesn't have to refresh.
+      const created = await createPlan(csv, (p.name || "").trim() || undefined);
+      const normalized = created.normalized_csv_text && created.normalized_csv_text.trim() ? created.normalized_csv_text : csv;
+      setCsvText(normalized);
+      setProjects((prev) => prev.map((x) => (x.id === p.id ? { ...x, csvText: normalized } : x)));
+
+      const scheduled = await schedulePlan({
+        planId: created.plan_id,
+        startDate: sd,
+        durationMode,
+        workingDays: Boolean(p.workingDays),
+      });
+      setPlanId(created.plan_id);
+      setLayout(scheduled.layout);
+
+      lastScheduleKeyRef.current = JSON.stringify({
+        planId: created.plan_id,
+        startDate: sd,
+        durationMode,
+        workingDays: Boolean(p.workingDays),
+      });
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      suppressAutoScheduleRef.current = false;
+      setBusy(false);
+    }
   }
 
   function ensureActiveProject(overrides?: Partial<ProjectRecord>): ProjectRecord {
@@ -376,6 +705,7 @@ export default function App() {
       startDate: (overrides?.startDate ?? startDate).trim() || todayISO(),
       workingDays: overrides?.workingDays ?? Boolean(workingDays),
       csvText: overrides?.csvText ?? (csvText || ""),
+      phases: overrides?.phases ?? [],
       fileName: overrides?.fileName ?? (fileName || ""),
       projectUrl: overrides?.projectUrl ?? (projectUrl || ""),
       issueRepo: overrides?.issueRepo ?? (issueRepo || ""),
@@ -406,6 +736,7 @@ export default function App() {
           startDate,
           workingDays,
           csvText,
+          phases: p.phases,
           fileName,
           projectUrl,
           issueRepo,
@@ -423,13 +754,18 @@ export default function App() {
 
   function openNewProjectModal() {
     setNewProjectName(projectName);
+    setNewProjectNameError("");
     setNewProjectStartDate(startDate);
     setNewProjectWorkingDays(workingDays);
     setNewProjectOpen(true);
   }
 
   function createNewProject() {
-    const pn = newProjectName.trim() || "Untitled Project";
+    const pn = newProjectName.trim();
+    if (!pn) {
+      setNewProjectNameError("Project name is required.");
+      return;
+    }
     const id = newProjectId();
     const p: ProjectRecord = {
       id,
@@ -437,6 +773,7 @@ export default function App() {
       startDate: (newProjectStartDate || todayISO()).trim(),
       workingDays: Boolean(newProjectWorkingDays),
       csvText: "",
+      phases: [],
       fileName: "",
       projectUrl: "",
       issueRepo: "",
@@ -883,6 +1220,7 @@ export default function App() {
   // Auto-run on upload (csvText changes from empty -> non-empty)
   useEffect(() => {
     if (!hasCsv) return;
+    if (suppressAutoScheduleRef.current) return;
     // Create a fresh plan whenever the CSV changes.
     void createAndSchedule();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1083,6 +1421,18 @@ export default function App() {
                     barPadPx={barPadPx}
                     projectName={projectName}
                     detailMode={detailMode}
+                    phaseFilter={phaseFilter}
+                    onPhaseFilterChange={setPhaseFilter}
+                    extraPhases={activeProject?.phases || []}
+                    phaseMajors={activeProject?.phaseMajors || {}}
+                    onAddPhase={openAddPhaseModal}
+                    onAddTask={openCreateTaskModal}
+                    onEditTask={(taskId) => {
+                      openEditTaskModal(taskId);
+                    }}
+                    onDeleteTask={(taskId) => {
+                      void deleteTaskAndReschedule(taskId);
+                    }}
                   />
                 </div>
               )}
@@ -1125,7 +1475,9 @@ export default function App() {
                           <button
                             type="button"
                             style={secondaryButtonStyle}
-                            onClick={() => loadProjectById(p.id)}
+                            onClick={() => {
+                              void openProjectById(p.id);
+                            }}
                             title="Open in Edit Project"
                           >
                             Open
@@ -1411,6 +1763,354 @@ export default function App() {
           </div>
         ) : null}
 
+        {addPhaseOpen ? (
+          <div
+            className="modalBackdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add phase"
+            onClick={() => setAddPhaseOpen(false)}
+          >
+            <div className="modalCard" onClick={(e) => e.stopPropagation()}>
+              <div className="modalHeader">
+                <div>Add Phase</div>
+                <button
+                  type="button"
+                  onClick={() => setAddPhaseOpen(false)}
+                  style={{ background: "transparent", border: "1px solid var(--border-2)", color: "var(--text)" }}
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gap: 10 }}>
+                <div>
+                  <div className="label">Phase name</div>
+                  <input
+                    value={addPhaseName}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setAddPhaseName(v);
+                      if (addPhaseError && v.trim()) setAddPhaseError("");
+                    }}
+                    placeholder="e.g. Design, Build, Test…"
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      createPhase();
+                    }}
+                    style={addPhaseError ? { borderColor: "var(--toast-error-border)" } : undefined}
+                  />
+                  {addPhaseError ? (
+                    <div className="small" style={{ marginTop: 6, color: "var(--toast-error-text)" }}>
+                      {addPhaseError}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="modalActions">
+                <button type="button" onClick={() => setAddPhaseOpen(false)} style={secondaryButtonStyle}>
+                  Cancel
+                </button>
+                <button type="button" onClick={createPhase} style={secondaryButtonStyle}>
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {createTaskOpen ? (
+          <div
+            className="modalBackdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Create task"
+            onClick={() => setCreateTaskOpen(false)}
+          >
+            <div
+              className="modalCard"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: 920,
+                maxHeight: "calc(100vh - 36px)",
+                overflow: "auto",
+              }}
+            >
+              <div className="modalHeader">
+                <div>Create new task</div>
+                <button
+                  type="button"
+                  onClick={() => setCreateTaskOpen(false)}
+                  style={{ background: "transparent", border: "1px solid var(--border-2)", color: "var(--text)" }}
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gap: 14 }}>
+                <div>
+                  <div className="label">Add a title *</div>
+                  <input
+                    value={createTaskTitle}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setCreateTaskTitle(v);
+                      if (createTaskTitleError && v.trim()) setCreateTaskTitleError("");
+                    }}
+                    placeholder="[Task] <Title of the task>"
+                    style={createTaskTitleError ? { borderColor: "var(--toast-error-border)" } : undefined}
+                  />
+                  {createTaskTitleError ? (
+                    <div className="small" style={{ marginTop: 6, color: "var(--toast-error-text)" }}>
+                      {createTaskTitleError}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <div>
+                    <div className="label">Phase</div>
+                    <input value={createTaskPhase} disabled />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <div>
+                      <div className="label">Wall days</div>
+                      <input
+                        type="text"
+                        value={String(createTaskWallDays)}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) setCreateTaskWallDays(n);
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <div className="label">Billable days</div>
+                      <input
+                        type="text"
+                        value={String(createTaskBillableDays)}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) setCreateTaskBillableDays(n);
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="label">Description</div>
+                  <div
+                    style={{
+                      border: "1px solid var(--border-2)",
+                      borderRadius: 10,
+                      overflow: "hidden",
+                      background: "var(--input-bg)",
+                    }}
+                  >
+                    <div style={{ display: "flex", borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
+                      <button
+                        type="button"
+                        onClick={() => setCreateTaskBodyTab("write")}
+                        style={{
+                          padding: "8px 10px",
+                          border: "none",
+                          background: createTaskBodyTab === "write" ? "var(--selected-row-bg)" : "transparent",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          fontWeight: 700,
+                        }}
+                      >
+                        Write
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCreateTaskBodyTab("preview")}
+                        style={{
+                          padding: "8px 10px",
+                          border: "none",
+                          background: createTaskBodyTab === "preview" ? "var(--selected-row-bg)" : "transparent",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          fontWeight: 700,
+                        }}
+                      >
+                        Preview
+                      </button>
+                    </div>
+                    {createTaskBodyTab === "write" ? (
+                      <textarea
+                        value={createTaskBody}
+                        onChange={(e) => setCreateTaskBody(e.target.value)}
+                        placeholder="What needs to be done and why it matters. Include any relevant context or links."
+                        style={{
+                          width: "100%",
+                          minHeight: 160,
+                          padding: 10,
+                          border: "none",
+                          outline: "none",
+                          background: "transparent",
+                          color: "var(--text)",
+                          resize: "vertical",
+                        }}
+                      />
+                    ) : (
+                      <div style={{ padding: 10, minHeight: 160, overflow: "auto" }}>
+                        {createTaskBody.trim() ? (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{createTaskBody}</ReactMarkdown>
+                        ) : (
+                          <div className="small">Nothing to preview.</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="label">Acceptance Criteria</div>
+                  <div
+                    style={{
+                      border: "1px solid var(--border-2)",
+                      borderRadius: 10,
+                      overflow: "hidden",
+                      background: "var(--input-bg)",
+                    }}
+                  >
+                    <div style={{ display: "flex", borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
+                      <button
+                        type="button"
+                        onClick={() => setCreateTaskAcceptanceTab("write")}
+                        style={{
+                          padding: "8px 10px",
+                          border: "none",
+                          background: createTaskAcceptanceTab === "write" ? "var(--selected-row-bg)" : "transparent",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          fontWeight: 700,
+                        }}
+                      >
+                        Write
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCreateTaskAcceptanceTab("preview")}
+                        style={{
+                          padding: "8px 10px",
+                          border: "none",
+                          background: createTaskAcceptanceTab === "preview" ? "var(--selected-row-bg)" : "transparent",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          fontWeight: 700,
+                        }}
+                      >
+                        Preview
+                      </button>
+                    </div>
+                    {createTaskAcceptanceTab === "write" ? (
+                      <textarea
+                        value={createTaskAcceptance}
+                        onChange={(e) => setCreateTaskAcceptance(e.target.value)}
+                        placeholder="- Condition 1\n- Condition 2"
+                        style={{
+                          width: "100%",
+                          minHeight: 120,
+                          padding: 10,
+                          border: "none",
+                          outline: "none",
+                          background: "transparent",
+                          color: "var(--text)",
+                          resize: "vertical",
+                        }}
+                      />
+                    ) : (
+                      <div style={{ padding: 10, minHeight: 120, overflow: "auto" }}>
+                        {createTaskAcceptance.trim() ? (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{createTaskAcceptance}</ReactMarkdown>
+                        ) : (
+                          <div className="small">Nothing to preview.</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="label">Dependencies</div>
+                  <input
+                    value={createTaskDepQuery}
+                    onChange={(e) => setCreateTaskDepQuery(e.target.value)}
+                    placeholder="Search tasks by ID/title/phase…"
+                  />
+                  <div style={{ marginTop: 10, maxHeight: 240, overflow: "auto", border: "1px solid var(--border)", borderRadius: 12 }}>
+                    {dependencyCandidates.map((t) => {
+                      const key = t.display_id || t.display_task_id || t.id;
+                      const checked = createTaskDeps.includes(t.id);
+                      return (
+                        <label
+                          key={t.id}
+                          style={{
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "center",
+                            padding: "8px 10px",
+                            borderBottom: "1px solid var(--border)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setCreateTaskDeps((prev) => {
+                                const s = new Set(prev);
+                                if (s.has(t.id)) s.delete(t.id);
+                                else s.add(t.id);
+                                return Array.from(s);
+                              });
+                            }}
+                          />
+                          <span className="mono" style={{ width: 64, flex: "0 0 auto", color: "var(--muted-2)" }}>
+                            {key}
+                          </span>
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {(t.title || t.name) + (t.phase ? ` — ${t.phase}` : "")}
+                          </span>
+                        </label>
+                      );
+                    })}
+                    {dependencyCandidates.length === 0 ? (
+                      <div className="small" style={{ padding: 10 }}>
+                        No tasks match.
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="small" style={{ marginTop: 8 }}>
+                    Tip: dependencies are selected from existing tasks (by Task ID) so they sync cleanly with scheduling.
+                  </div>
+                </div>
+              </div>
+
+              <div className="modalActions">
+                <button type="button" onClick={() => setCreateTaskOpen(false)} style={secondaryButtonStyle} disabled={busy}>
+                  Cancel
+                </button>
+                {createTaskMode === "edit" ? (
+                  <button type="button" onClick={() => void saveEditedTask()} style={secondaryButtonStyle} disabled={busy}>
+                    Save
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => void createTask()} style={secondaryButtonStyle} disabled={busy}>
+                    Create
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {newProjectOpen ? (
           <div
             className="modalBackdrop"
@@ -1435,7 +2135,21 @@ export default function App() {
               <div style={{ display: "grid", gap: 12 }}>
                 <div>
                   <div className="label">Project name</div>
-                  <input value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} placeholder="e.g. Client – Plant – Station" />
+                  <input
+                    value={newProjectName}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setNewProjectName(v);
+                      if (newProjectNameError && v.trim()) setNewProjectNameError("");
+                    }}
+                    placeholder="e.g. Client – Plant – Station"
+                    style={newProjectNameError ? { borderColor: "var(--toast-error-border)" } : undefined}
+                  />
+                  {newProjectNameError ? (
+                    <div className="small" style={{ marginTop: 6, color: "var(--toast-error-text)" }}>
+                      {newProjectNameError}
+                    </div>
+                  ) : null}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <div>
@@ -1513,7 +2227,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (selectProjectId) loadProjectById(selectProjectId);
+                    if (selectProjectId) void openProjectById(selectProjectId);
                     setSelectProjectOpen(false);
                   }}
                   disabled={!selectProjectId}

@@ -15,6 +15,14 @@ type Props = {
   timeAxisMode?: "dayCount" | "weeks" | "months" | "calendarDays" | "calendarWeeks" | "calendarMonths";
   phaseLayout?: "linear" | "stacked";
   barPadPx?: number;
+  phaseFilter?: string[];
+  onPhaseFilterChange?: (phases: string[]) => void;
+  extraPhases?: string[];
+  phaseMajors?: Record<string, number>;
+  onAddPhase?: () => void;
+  onAddTask?: (phase: string) => void;
+  onEditTask?: (taskId: string) => void;
+  onDeleteTask?: (taskId: string) => void;
 };
 
 function groupByPhase(tasks: TaskItem[]) {
@@ -276,10 +284,26 @@ export const GanttChart: React.FC<Props> = ({
   timeAxisMode = "dayCount",
   phaseLayout = "stacked",
   barPadPx = 0,
+  phaseFilter: phaseFilterProp,
+  onPhaseFilterChange,
+  extraPhases = [],
+  phaseMajors = {},
+  onAddPhase,
+  onAddTask,
+  onEditTask,
+  onDeleteTask,
 }) => {
+  const formatPhaseLabel = (ph: string) => {
+    const major = phaseMajors[ph];
+    if (typeof major === "number" && Number.isFinite(major) && major > 0) return `${major} — ${ph}`;
+    return ph;
+  };
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [search, setSearch] = useState("");
-  const [phaseFilter, setPhaseFilter] = useState<string>("");
+  const [phaseFilterInternal, setPhaseFilterInternal] = useState<string[]>([]);
+  const phaseFilter = phaseFilterProp !== undefined ? phaseFilterProp : phaseFilterInternal;
+  const setPhaseFilter = onPhaseFilterChange || setPhaseFilterInternal;
+  const [phasePickerOpen, setPhasePickerOpen] = useState<boolean>(false);
   const [selectedId, setSelectedId] = useState<string>("");
   const [infoOpen, setInfoOpen] = useState<boolean>(false);
 
@@ -293,17 +317,57 @@ export const GanttChart: React.FC<Props> = ({
   const criticalIdSet = criticalSet;
 
   const phases = useMemo(() => {
-    const s = new Set<string>();
-    for (const t of tasks) s.add(t.phase || "Unphased");
-    return Array.from(s).sort();
-  }, [tasks]);
+    // Order phases that have tasks first (stable by earliest task row),
+    // then append any "empty" phases (created but no tasks yet).
+    const byPhaseMinRow = new Map<string, number>();
+    for (const t of tasks) {
+      const ph = t.phase || "Unphased";
+      const cur = byPhaseMinRow.get(ph);
+      byPhaseMinRow.set(ph, cur == null ? t.schedule.row : Math.min(cur, t.schedule.row));
+    }
+
+    const withTasks = Array.from(byPhaseMinRow.entries())
+      .sort((a, b) => a[1] - b[1])
+      .map(([ph]) => ph);
+
+    const extrasOnly = (extraPhases || [])
+      .map((p) => (p || "").trim())
+      .filter(Boolean)
+      .filter((p) => !byPhaseMinRow.has(p))
+      .sort((a, b) => a.localeCompare(b));
+
+    // De-dupe while preserving the computed order.
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const ph of [...withTasks, ...extrasOnly]) {
+      if (seen.has(ph)) continue;
+      seen.add(ph);
+      out.push(ph);
+    }
+    return out;
+  }, [tasks, extraPhases]);
+
+  const phaseFilterLabel = useMemo(() => {
+    const sel = (phaseFilter || []).map((p) => (p || "").trim()).filter(Boolean);
+    if (!sel.length) return "All phases";
+    if (sel.length === 1) return formatPhaseLabel(sel[0]);
+    return `${sel.length} phases`;
+  }, [phaseFilter]);
+
+  useEffect(() => {
+    if (!phasePickerOpen) return;
+    const onDoc = () => setPhasePickerOpen(false);
+    window.addEventListener("click", onDoc);
+    return () => window.removeEventListener("click", onDoc);
+  }, [phasePickerOpen]);
 
   const filtered = useMemo(() => {
     // In phase summary mode, we don't show per-task rows, so task search is not useful.
     // Keep phaseFilter behavior (if it's set via previous view), but ignore text search.
     const q = phaseSummary ? "" : search.trim().toLowerCase();
+    const selected = new Set((phaseFilter || []).map((p) => (p || "").trim()).filter(Boolean));
     return tasks.filter(t => {
-      if (phaseFilter && (t.phase || "Unphased") !== phaseFilter) return false;
+      if (selected.size > 0 && !selected.has(t.phase || "Unphased")) return false;
       if (!q) return true;
       const key = t.display_id || t.display_task_id || t.id;
       const hay = `${key} ${t.name} ${t.details ?? ""}`.toLowerCase();
@@ -582,20 +646,26 @@ export const GanttChart: React.FC<Props> = ({
   const width = Math.max(900, (maxXDay + 5) * pxPerDay);
   const chartPadLeft = 10; // pixels of breathing room at left edge
   const svgWidth = width + chartPadLeft;
-  const groups = useMemo(() => groupByPhase(filtered), [filtered]);
-
-  const phaseRows = useMemo(() => {
-    // Build phase row order from the full plan (stable by earliest schedule row).
-    const byPhase = new Map<string, number>();
-    for (const t of tasks) {
+  const groups = useMemo(() => {
+    // Build groups using the full phase list so phases with no tasks still render
+    // a header row in the left pane (important for adding tasks later).
+    const selected = new Set((phaseFilter || []).map((p) => (p || "").trim()).filter(Boolean));
+    const visiblePhases = selected.size === 0 ? phases : phases.filter((p) => selected.has(p));
+    const byPhase = new Map<string, TaskItem[]>();
+    for (const t of filtered) {
       const ph = t.phase || "Unphased";
-      const cur = byPhase.get(ph);
-      byPhase.set(ph, cur == null ? t.schedule.row : Math.min(cur, t.schedule.row));
+      if (!byPhase.has(ph)) byPhase.set(ph, []);
+      byPhase.get(ph)!.push(t);
     }
-    return Array.from(byPhase.entries())
-      .sort((a, b) => a[1] - b[1])
-      .map(([ph]) => ph);
-  }, [tasks]);
+    const out = visiblePhases.map((ph) => {
+      const ts = byPhase.get(ph) || [];
+      ts.sort((a, b) => a.schedule.row - b.schedule.row);
+      return { phase: ph, tasks: ts };
+    });
+    return out;
+  }, [filtered, phases, phaseFilter]);
+
+  const phaseRows = useMemo(() => phases, [phases]);
 
   // Build a "display row model" that both panes use. This fixes misalignment when
   // the left pane includes phase header rows (extra vertical height) but the SVG
@@ -924,10 +994,96 @@ export const GanttChart: React.FC<Props> = ({
                 {projectName.trim() ? <option value="current">{projectName.trim()}</option> : null}
               </select>
             ) : (
-              <select value={phaseFilter} onChange={(e) => setPhaseFilter(e.target.value)}>
-                <option value="">All phases</option>
-                {phases.map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <div style={{ position: "relative", flex: 1 }} onClick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    onClick={() => setPhasePickerOpen((v) => !v)}
+                    style={{
+                      width: "100%",
+                      height: 44,
+                      padding: "10px 10px",
+                      borderRadius: 10,
+                      border: "1px solid var(--border-2)",
+                      background: "var(--input-bg)",
+                      color: "var(--text)",
+                      textAlign: "left",
+                      cursor: "pointer",
+                    }}
+                    title={phaseFilterLabel}
+                  >
+                    {phaseFilterLabel}
+                  </button>
+                  {phasePickerOpen ? (
+                    <div
+                      style={{
+                        position: "absolute",
+                        zIndex: 5,
+                        top: 48,
+                        left: 0,
+                        right: 0,
+                        background: "var(--card)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 12,
+                        padding: 10,
+                        boxShadow: "0 12px 30px rgba(0,0,0,0.12)",
+                        maxHeight: 260,
+                        overflow: "auto",
+                      }}
+                    >
+                      <label style={{ display: "flex", gap: 10, alignItems: "center", padding: "6px 6px", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={(phaseFilter || []).length === 0}
+                          onChange={() => setPhaseFilter([])}
+                        />
+                        <span>All phases</span>
+                      </label>
+                      <div style={{ height: 1, background: "var(--border)", margin: "6px 0" }} />
+                      {phases.map((ph) => {
+                        const selected = (phaseFilter || []).includes(ph);
+                        return (
+                          <label key={ph} style={{ display: "flex", gap: 10, alignItems: "center", padding: "6px 6px", cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={() => {
+                                const cur = (phaseFilter || []).slice();
+                                // If we were in "All phases" mode (empty), start from empty selection.
+                                const base = cur.length === 0 ? [] : cur;
+                                const idx = base.indexOf(ph);
+                                if (idx >= 0) base.splice(idx, 1);
+                                else base.push(ph);
+                                setPhaseFilter(base);
+                              }}
+                            />
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatPhaseLabel(ph)}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onAddPhase?.()}
+                  disabled={!onAddPhase}
+                  title="Add phase"
+                  style={{
+                    width: 44,
+                    height: 44,
+                    padding: 0,
+                    borderRadius: 10,
+                    border: "1px solid var(--border-2)",
+                    background: "var(--card)",
+                    color: "var(--text)",
+                    cursor: "pointer",
+                    flex: "0 0 auto",
+                  }}
+                >
+                  +
+                </button>
+              </div>
             )}
           </div>
           <div style={{ flex: 1 }} />
@@ -988,7 +1144,34 @@ export const GanttChart: React.FC<Props> = ({
                       alignItems: "center",
                     }}
                   >
-                    {g.phase}
+                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {formatPhaseLabel(g.phase)}
+                    </span>
+                    {!phaseSummary ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onAddTask?.(g.phase);
+                        }}
+                        disabled={!onAddTask}
+                        title="Add task"
+                        aria-label={`Add task to phase ${g.phase}`}
+                        style={{
+                          width: 30,
+                          height: 30,
+                          padding: 0,
+                          borderRadius: 10,
+                          border: "1px solid var(--border-2)",
+                          background: "var(--card)",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          flex: "0 0 auto",
+                        }}
+                      >
+                        +
+                      </button>
+                    ) : null}
                   </div>
                   {g.tasks.map(t => (
                     <div
@@ -1080,22 +1263,63 @@ export const GanttChart: React.FC<Props> = ({
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>Task details</div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setInfoOpen(false)}
-                      title="Close details panel"
-                      aria-label="Close details panel"
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 10,
-                        border: "1px solid var(--border-2)",
-                        background: "var(--card)",
-                        color: "var(--text)",
-                        lineHeight: 1,
-                      }}
-                    >
-                      ✕
-                    </button>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flex: "0 0 auto" }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!selected) return;
+                          onEditTask?.(selected.id);
+                        }}
+                        disabled={!selected || !onEditTask}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--border-2)",
+                          background: "var(--card)",
+                          color: "var(--text)",
+                          lineHeight: 1,
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!selected) return;
+                          const ok = window.confirm("Delete this task? Dependency references will be removed from other tasks.");
+                          if (!ok) return;
+                          onDeleteTask?.(selected.id);
+                          setInfoOpen(false);
+                        }}
+                        disabled={!selected || !onDeleteTask}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--toast-error-border)",
+                          background: "var(--card)",
+                          color: "var(--toast-error-text)",
+                          lineHeight: 1,
+                        }}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setInfoOpen(false)}
+                        title="Close details panel"
+                        aria-label="Close details panel"
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--border-2)",
+                          background: "var(--card)",
+                          color: "var(--text)",
+                          lineHeight: 1,
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </div>
                 </div>
                 <div style={{ padding: 12, overflow: "auto", height: "calc(100% - 62px)" }}>
