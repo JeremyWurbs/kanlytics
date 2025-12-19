@@ -22,6 +22,7 @@ from kanlytics.core.github_issue import GitHubIssue
 from kanlytics.core.github_project_v2 import GitHubProjectV2, new_uuid
 
 STATUS_OPTIONS = ["Backlog", "Planned", "In Progress", "In Review", "Done"]
+PHASE_META_MARKER = "<!-- kanlytics:phase-meta -->"
 
 
 # ----------------------------
@@ -145,6 +146,7 @@ class AppendTaskInput(BaseModel):
     wall_days: float = Field(default=1.0, ge=0.0, description="Wall days duration.")
     billable_days: float = Field(default=1.0, ge=0.0, description="Billable days duration.")
     status: Optional[str] = Field(default=None, description="Status column value (Backlog/Planned/In Progress/In Review/Done).")
+    repo: Optional[str] = Field(default=None, description="Repo for this issue (owner/repo). Defaults to project default repo.")
     phase_major: Optional[int] = Field(default=None, ge=0, description="Optional major number for phase display IDs (e.g. 6 for 6.1).")
 
 
@@ -162,6 +164,7 @@ class UpdateTaskInput(BaseModel):
     wall_days: Optional[float] = Field(default=None, ge=0.0)
     billable_days: Optional[float] = Field(default=None, ge=0.0)
     status: Optional[str] = None
+    repo: Optional[str] = None
 
 
 class UpdateTaskOutput(BaseModel):
@@ -211,6 +214,61 @@ class ExportProjectOutput(BaseModel):
     added_existing_issues: int = 0
     errors: list[str] = Field(default_factory=list)
 
+class GetPhaseMetaInput(BaseModel):
+    project_url: str = Field(..., description="GitHub ProjectV2 board URL.")
+    phase: str = Field(..., description="Phase name to fetch the meta issue for.")
+    issue_repo: Optional[str] = Field(
+        default=None,
+        description="Optional target repo ('owner/repo' or URL) for creating the phase meta issue if missing.",
+    )
+
+
+class GetPhaseMetaOutput(BaseModel):
+    phase: str
+    task_id: str
+    item_id: str
+    type: str
+    issue_url: Optional[str] = None
+    title: str
+    description: str
+    body: str
+
+
+class UpdatePhaseMetaInput(BaseModel):
+    project_url: str = Field(..., description="GitHub ProjectV2 board URL.")
+    phase: str = Field(..., description="Phase name whose meta issue to update.")
+    description: str = Field(default="", description="Editable phase description/notes (markdown). Task list is auto-generated.")
+    issue_repo: Optional[str] = Field(
+        default=None,
+        description="Optional target repo ('owner/repo' or URL) for creating the phase meta issue if missing.",
+    )
+
+
+class UpdatePhaseMetaOutput(GetPhaseMetaOutput):
+    pass
+
+
+class GetPhaseMetaCsvInput(BaseModel):
+    repo: str = Field(..., description="Default repo for the project (owner/repo).")
+    project_name: str = Field(..., description="Project name (used to scope deterministic phase meta IDs).")
+    csv_text: str = Field(..., description="Current project CSV text (V2).")
+    phase: str = Field(..., description="Phase name to fetch the meta issue for.")
+
+
+class GetPhaseMetaCsvOutput(GetPhaseMetaOutput):
+    pass
+
+
+class UpdatePhaseMetaCsvInput(BaseModel):
+    repo: str = Field(..., description="Default repo for the project (owner/repo).")
+    project_name: str = Field(..., description="Project name (used to scope deterministic phase meta IDs).")
+    csv_text: str = Field(..., description="Current project CSV text (V2).")
+    phase: str = Field(..., description="Phase name to update.")
+    description: str = Field(default="", description="Editable phase description/notes (markdown). Task list is auto-generated.")
+
+
+class UpdatePhaseMetaCsvOutput(GetPhaseMetaOutput):
+    pass
 
 class StartJobOutput(BaseModel):
     job_id: str
@@ -341,6 +399,30 @@ export_project_start_task = TaskSchema(
     output_schema=StartJobOutput,
 )
 
+get_phase_meta_task = TaskSchema(
+    name="github.get_phase_meta",
+    input_schema=GetPhaseMetaInput,
+    output_schema=GetPhaseMetaOutput,
+)
+
+update_phase_meta_task = TaskSchema(
+    name="github.update_phase_meta",
+    input_schema=UpdatePhaseMetaInput,
+    output_schema=UpdatePhaseMetaOutput,
+)
+
+get_phase_meta_csv_task = TaskSchema(
+    name="github.get_phase_meta_csv",
+    input_schema=GetPhaseMetaCsvInput,
+    output_schema=GetPhaseMetaCsvOutput,
+)
+
+update_phase_meta_csv_task = TaskSchema(
+    name="github.update_phase_meta_csv",
+    input_schema=UpdatePhaseMetaCsvInput,
+    output_schema=UpdatePhaseMetaCsvOutput,
+)
+
 job_status_task = TaskSchema(
     name="github.job_status",
     input_schema=JobStatusInput,
@@ -398,6 +480,10 @@ class GanttService(Service):
         self.add_endpoint("github.export_project", self.export_project, schema=export_project_task)
         self.add_endpoint("github.connect_project_start", self.connect_project_start, schema=connect_project_start_task)
         self.add_endpoint("github.export_project_start", self.export_project_start, schema=export_project_start_task)
+        self.add_endpoint("github.get_phase_meta", self.get_phase_meta, schema=get_phase_meta_task)
+        self.add_endpoint("github.update_phase_meta", self.update_phase_meta, schema=update_phase_meta_task)
+        self.add_endpoint("github.get_phase_meta_csv", self.get_phase_meta_csv, schema=get_phase_meta_csv_task)
+        self.add_endpoint("github.update_phase_meta_csv", self.update_phase_meta_csv, schema=update_phase_meta_csv_task)
         self.add_endpoint("github.job_status", self.job_status, schema=job_status_task)
 
     # -------------
@@ -541,6 +627,7 @@ class GanttService(Service):
             "Display Task ID",
             "Task ID",
             "url",
+            "repo",
             "number",
             "state",
             "project_name",
@@ -632,6 +719,7 @@ class GanttService(Service):
             "Display Task ID": display_task_id,
             "Task ID": task_id,
             "url": "",
+            "repo": (payload.repo or "").strip(),
             "number": "",
             "state": "open",
             "project_name": (payload.project_name or "").strip(),
@@ -670,6 +758,7 @@ class GanttService(Service):
             "Display Task ID",
             "Task ID",
             "url",
+            "repo",
             "number",
             "state",
             "project_name",
@@ -727,6 +816,8 @@ class GanttService(Service):
                 if status not in STATUS_OPTIONS:
                     status = "Backlog"
                 r["status"] = status
+            if payload.repo is not None:
+                r["repo"] = (payload.repo or "").strip()
 
             break
 
@@ -752,6 +843,7 @@ class GanttService(Service):
             "Display Task ID",
             "Task ID",
             "url",
+            "repo",
             "number",
             "state",
             "project_name",
@@ -908,6 +1000,11 @@ class GanttService(Service):
             if not item_id:
                 continue
 
+            # Skip Kanlytics "phase meta issues" (they should not be treated as schedulable tasks).
+            body_text = (content.get("body") or "").strip()
+            if PHASE_META_MARKER in body_text:
+                continue
+
             task_id = client._get_text_field_value(item, "Task ID")
             if not task_id:
                 task_id = new_uuid()
@@ -935,6 +1032,9 @@ class GanttService(Service):
                 labels = [n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if (n or {}).get("name")]
                 assignees = [n.get("login") for n in (content.get("assignees") or {}).get("nodes", []) if (n or {}).get("login")]
                 number = content.get("number")
+                repo_owner = ((content.get("repository") or {}).get("owner") or {}).get("login")
+                repo_name = (content.get("repository") or {}).get("name")
+                repo_ref = f"{repo_owner}/{repo_name}" if repo_owner and repo_name else None
                 issue = GitHubIssue(
                     task_id=task_id,
                     id=task_id,
@@ -947,6 +1047,7 @@ class GanttService(Service):
                     updated_at=content.get("updatedAt"),
                     closed_at=content.get("closedAt"),
                     url=content.get("url"),
+                    repo=repo_ref,
                     labels=[l for l in labels if l],
                     assignees=[a for a in assignees if a],
                     phase=phase,
@@ -992,6 +1093,498 @@ class GanttService(Service):
             project_start_date=None if earliest is None else earliest.isoformat(),
         )
 
+    def get_phase_meta(self, payload: GetPhaseMetaInput) -> GetPhaseMetaOutput:
+        """
+        Fetch (and if needed create) the Phase "meta issue" for the given phase.
+
+        The meta issue is a real GitHub Issue when we can determine a repo; otherwise a DraftIssue.
+        The task checklist portion is auto-generated.
+        """
+        from uuid import NAMESPACE_URL, uuid5
+
+        phase = (payload.phase or "").strip()
+        if not phase:
+            raise ValueError("phase is required.")
+
+        client = GitHubProjectV2(payload.project_url)
+        status_field_id, status_option_ids = client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
+        task_id_field_id = client.ensure_text_field("Task ID")
+        display_id_field_id = client.ensure_text_field("Display Task ID")
+        phase_field_id = client.ensure_text_field("Phase")
+        deps_field_id = client.ensure_text_field("Dependencies")
+        wall_days_field_id = client.ensure_text_field("Wall Days")
+        billable_days_field_id = client.ensure_text_field("Billable Days")
+
+        phase_task_id = str(uuid5(NAMESPACE_URL, f"kanlytics:phase:{payload.project_url}:{phase}"))
+
+        items = list(client.iter_items())
+
+        # Infer a repo for creating/formatting refs.
+        issue_repo = (payload.issue_repo or "").strip() or None
+        if not issue_repo:
+            for it in items:
+                c = it.get("content") or {}
+                if c.get("__typename") != "Issue":
+                    continue
+                url = (c.get("url") or "").strip()
+                if not url:
+                    continue
+                try:
+                    owner, repo, _ = client.parse_issue_url(url)
+                    issue_repo = f"{owner}/{repo}"
+                    break
+                except Exception:
+                    continue
+
+        def _is_meta(it: dict) -> bool:
+            c = it.get("content") or {}
+            return PHASE_META_MARKER in ((c.get("body") or "") or "")
+
+        def _format_ref(meta_repo: Optional[str], issue_url: str) -> str:
+            owner, repo, number = client.parse_issue_url(issue_url)
+            if meta_repo and meta_repo.lower() == f"{owner}/{repo}".lower():
+                return f"#{number}"
+            return f"{owner}/{repo}#{number}"
+
+        # Build the checklist lines from current project items for this phase.
+        phase_items: list[dict] = []
+        for it in items:
+            if _is_meta(it):
+                continue
+            c = it.get("content") or {}
+            tn = c.get("__typename")
+            if tn not in ("Issue", "DraftIssue"):
+                continue
+            ph = (client._get_text_field_value(it, "Phase") or "").strip() or "Unphased"
+            if ph != phase:
+                continue
+            phase_items.append(it)
+
+        def _sort_key(it: dict) -> tuple:
+            c = it.get("content") or {}
+            tn = c.get("__typename")
+            if tn == "Issue":
+                try:
+                    num = int(c.get("number") or 0)
+                except Exception:
+                    num = 0
+                return (0, num)
+            # Drafts last, by title
+            return (1, (c.get("title") or "").strip().lower())
+
+        phase_items.sort(key=_sort_key)
+
+        checklist: list[str] = []
+        for it in phase_items:
+            c = it.get("content") or {}
+            tn = c.get("__typename")
+            title = (c.get("title") or "").strip() or "(untitled)"
+            if tn == "Issue":
+                url = (c.get("url") or "").strip()
+                if url:
+                    checklist.append(f"- [ ] {_format_ref(issue_repo, url)} {title}")
+                else:
+                    checklist.append(f"- [ ] {title}")
+            else:
+                checklist.append(f"- [ ] (draft) {title}")
+
+        # Find existing meta issue item by deterministic Task ID.
+        rec = None
+        for it in items:
+            item_id = it.get("id")
+            c = it.get("content") or {}
+            tn = c.get("__typename")
+            if tn not in ("Issue", "DraftIssue") or not item_id:
+                continue
+            if (client._get_text_field_value(it, "Task ID") or "").strip() == phase_task_id:
+                rec = {
+                    "item_id": item_id,
+                    "type": tn,
+                    "issue_url": c.get("url") if tn == "Issue" else None,
+                    "draft_issue_id": c.get("id") if tn == "DraftIssue" else None,
+                }
+                break
+
+        # If the meta issue already exists as a real Issue, prefer its actual repo for formatting "#123" shorthand.
+        if rec and rec.get("issue_url"):
+            try:
+                owner, repo, _ = client.parse_issue_url(rec["issue_url"])
+                issue_repo = f"{owner}/{repo}"
+            except Exception:
+                pass
+
+        # Extract description from an existing body, if present.
+        description = ""
+        if rec:
+            # Locate the actual item content to read its body.
+            existing_body = ""
+            for it in items:
+                if it.get("id") == rec["item_id"]:
+                    existing_body = (it.get("content") or {}).get("body") or ""
+                    break
+            txt = str(existing_body or "")
+            if PHASE_META_MARKER in txt:
+                # naive but reliable: grab everything after the '## phase' line up to first checklist line.
+                lines = txt.splitlines()
+                try:
+                    hdr_idx = next(i for i, ln in enumerate(lines) if ln.strip() == f"## {phase}")
+                except StopIteration:
+                    hdr_idx = -1
+                if hdr_idx >= 0:
+                    after = lines[hdr_idx + 1 :]
+                    desc_lines: list[str] = []
+                    for ln in after:
+                        if ln.strip().startswith("- [ ]"):
+                            break
+                        # skip leading empty line
+                        desc_lines.append(ln)
+                    description = "\n".join(desc_lines).strip()
+
+        # If missing, create the meta issue now.
+        if not rec:
+            if issue_repo:
+                labels_safe = client.ensure_labels_exist(repo=issue_repo, labels=["kanlytics:phase"])
+                created_url = client.create_issue_rest(repo=issue_repo, title=phase, body="", labels=labels_safe, assignees=[])
+                owner, repo, number = client.parse_issue_url(created_url)
+                issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                rec = {"item_id": item_id, "type": "Issue", "issue_url": created_url, "draft_issue_id": None}
+            else:
+                item_id = client.add_draft_issue(title=phase, body="")
+                rec = {"item_id": item_id, "type": "DraftIssue", "issue_url": None, "draft_issue_id": item_id}
+
+        # Compose the canonical body (preserve description, regenerate checklist).
+        parts: list[str] = [PHASE_META_MARKER, f"## {phase}"]
+        if description.strip():
+            parts.append("")
+            parts.extend(description.strip().splitlines())
+        parts.append("")
+        parts.extend(checklist)
+        body = "\n".join(parts).strip() + "\n"
+
+        # Ensure project fields are set.
+        client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=phase_task_id)
+        client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=phase)
+        client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text="")
+        client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text="0")
+        client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text="0")
+        client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids["Backlog"])
+        # Display Task ID: best-effort "major.0" from items in this phase
+        try:
+            import re
+
+            majors: list[int] = []
+            for it in phase_items:
+                disp = (client._get_text_field_value(it, "Display Task ID") or "").strip()
+                m = re.match(r"^(\d+)\.(\d+)$", disp)
+                if m:
+                    majors.append(int(m.group(1)))
+            if majors:
+                major = max(set(majors), key=lambda v: (majors.count(v), -v))
+                client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=f"{major}.0")
+        except Exception:
+            pass
+
+        # Update body on GitHub to match canonical format.
+        if rec["type"] == "Issue" and rec.get("issue_url"):
+            owner, repo, _ = client.parse_issue_url(rec["issue_url"])
+            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=["kanlytics:phase"])
+            client.update_issue_rest(issue_url=rec["issue_url"], title=phase, body=body, labels=labels_safe, assignees=[])
+        else:
+            draft_id = rec.get("draft_issue_id")
+            if draft_id:
+                client.update_draft_issue(draft_issue_id=draft_id, title=phase, body=body)
+
+        return GetPhaseMetaOutput(
+            phase=phase,
+            task_id=phase_task_id,
+            item_id=rec["item_id"],
+            type=rec["type"],
+            issue_url=rec.get("issue_url"),
+            title=phase,
+            description=description,
+            body=body,
+        )
+
+    def update_phase_meta(self, payload: UpdatePhaseMetaInput) -> UpdatePhaseMetaOutput:
+        """
+        Update the editable description portion of a phase meta issue and regenerate its checklist.
+        """
+        # We implement this as: get -> overwrite description -> rewrite canonical body.
+        # NOTE: description is the only editable region; task list is auto-generated.
+        got = self.get_phase_meta(GetPhaseMetaInput(project_url=payload.project_url, phase=payload.phase, issue_repo=payload.issue_repo))
+        phase = got.phase
+        description = (payload.description or "").strip()
+
+        client = GitHubProjectV2(payload.project_url)
+        task_id_field_id = client.ensure_text_field("Task ID")
+
+        # Locate the meta item to update.
+        rec = None
+        for it in client.iter_items():
+            item_id = it.get("id")
+            c = it.get("content") or {}
+            tn = c.get("__typename")
+            if tn not in ("Issue", "DraftIssue") or not item_id:
+                continue
+            if (client._get_text_field_value(it, "Task ID") or "").strip() == got.task_id:
+                rec = {
+                    "item_id": item_id,
+                    "type": tn,
+                    "issue_url": c.get("url") if tn == "Issue" else None,
+                    "draft_issue_id": c.get("id") if tn == "DraftIssue" else None,
+                }
+                break
+        if not rec:
+            # Shouldn't happen because get_phase_meta creates it, but keep safe.
+            raise ValueError("Phase meta issue not found after creation.")
+
+        # Reuse the checklist from get_phase_meta's body by stripping everything up to first checklist line.
+        lines = got.body.splitlines()
+        checklist_idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith("- [ ]"):
+                checklist_idx = i
+                break
+        checklist = lines[checklist_idx:] if checklist_idx is not None else []
+
+        parts: list[str] = [PHASE_META_MARKER, f"## {phase}"]
+        if description:
+            parts.append("")
+            parts.extend(description.splitlines())
+        parts.append("")
+        parts.extend(checklist)
+        body = "\n".join(parts).strip() + "\n"
+
+        # Ensure Task ID is set (idempotent)
+        client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=got.task_id)
+
+        if rec["type"] == "Issue" and rec.get("issue_url"):
+            owner, repo, _ = client.parse_issue_url(rec["issue_url"])
+            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=["kanlytics:phase"])
+            client.update_issue_rest(issue_url=rec["issue_url"], title=phase, body=body, labels=labels_safe, assignees=[])
+        else:
+            draft_id = rec.get("draft_issue_id")
+            if draft_id:
+                client.update_draft_issue(draft_issue_id=draft_id, title=phase, body=body)
+
+        return UpdatePhaseMetaOutput(
+            phase=phase,
+            task_id=got.task_id,
+            item_id=rec["item_id"],
+            type=rec["type"],
+            issue_url=rec.get("issue_url"),
+            title=phase,
+            description=description,
+            body=body,
+        )
+
+    def get_phase_meta_csv(self, payload: GetPhaseMetaCsvInput) -> GetPhaseMetaCsvOutput:
+        """
+        Repo-only phase meta issue support (no ProjectV2 URL required).
+
+        This is used when a project hasn't been connected to a GitHub Project board yet.
+        We create/update a real Issue in the provided repo and generate the checklist
+        from the local CSV tasks.
+        """
+        import requests
+        from uuid import NAMESPACE_URL, uuid5
+
+        from kanlytics.core.github_project_v2 import GitHubProjectV2, detect_github_token, parse_repo_ref
+
+        repo = (payload.repo or "").strip()
+        project_name = (payload.project_name or "").strip()
+        phase = (payload.phase or "").strip()
+        if not repo:
+            raise ValueError("repo is required.")
+        if not project_name:
+            raise ValueError("project_name is required.")
+        if not phase:
+            raise ValueError("phase is required.")
+
+        token = detect_github_token()
+        if not token:
+            raise ValueError("GitHub token required (set in config.ini or env var like GITHUB_TOKEN)")
+
+        headers = {
+            "Authorization": f"token {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "kanlytics/1.0",
+        }
+
+        owner, name = parse_repo_ref(repo)
+        phase_task_id = str(uuid5(NAMESPACE_URL, f"kanlytics:phase:{repo}:{project_name}:{phase}"))
+        marker = f"{PHASE_META_MARKER} id={phase_task_id}"
+
+        gantt = self._gantt_from_csv_text(payload.csv_text or "")
+        tasks = [t for t in gantt.tasks if ((getattr(t, "phase", "") or "Unphased").strip() or "Unphased") == phase]
+        tasks.sort(key=lambda t: ((getattr(t, "display_task_id", "") or "").strip(), (getattr(t, "title", "") or getattr(t, "name", "") or "").strip().lower()))
+
+        def _format_ref(issue_url: str) -> str:
+            o, r, num = GitHubProjectV2.parse_issue_url(issue_url)
+            if f"{o}/{r}".lower() == f"{owner}/{name}".lower():
+                return f"#{num}"
+            return f"{o}/{r}#{num}"
+
+        checklist: list[str] = []
+        for t in tasks:
+            title = (getattr(t, "title", None) or getattr(t, "name", "") or "").strip() or "(untitled)"
+            url = (getattr(t, "url", None) or "").strip()
+            if url:
+                checklist.append(f"- [ ] {_format_ref(url)} {title}")
+            else:
+                disp = (getattr(t, "display_task_id", None) or getattr(t, "task_id", None) or getattr(t, "id", None) or "").strip()
+                checklist.append(f"- [ ] {disp + ' ' if disp else ''}{title}".rstrip())
+
+        # Find existing meta issue by searching in body for the deterministic id marker.
+        search_q = f"repo:{owner}/{name} in:body {phase_task_id} type:issue"
+        sr = requests.get("https://api.github.com/search/issues", headers=headers, params={"q": search_q, "per_page": 1})
+        sr.raise_for_status()
+        items = (sr.json() or {}).get("items") or []
+        issue_url = (items[0].get("html_url") if items else None)
+
+        description = ""
+        existing_body = ""
+        if issue_url:
+            _, _, num = GitHubProjectV2.parse_issue_url(issue_url)
+            gr = requests.get(f"https://api.github.com/repos/{owner}/{name}/issues/{num}", headers=headers)
+            gr.raise_for_status()
+            data = gr.json() or {}
+            existing_body = data.get("body") or ""
+            # Extract existing description between header and checklist.
+            txt = str(existing_body or "")
+            if phase_task_id in txt:
+                lines = txt.splitlines()
+                try:
+                    hdr_idx = next(i for i, ln in enumerate(lines) if ln.strip() == f"## {phase}")
+                except StopIteration:
+                    hdr_idx = -1
+                if hdr_idx >= 0:
+                    after = lines[hdr_idx + 1 :]
+                    desc_lines: list[str] = []
+                    for ln in after:
+                        if ln.strip().startswith("- [ ]"):
+                            break
+                        desc_lines.append(ln)
+                    description = "\n".join(desc_lines).strip()
+
+        # Compose canonical body
+        parts: list[str] = [marker, f"## {phase}"]
+        if description.strip():
+            parts.append("")
+            parts.extend(description.strip().splitlines())
+        parts.append("")
+        parts.extend(checklist)
+        body = "\n".join(parts).strip() + "\n"
+
+        # Ensure label exists best-effort.
+        try:
+            lr = requests.get(f"https://api.github.com/repos/{owner}/{name}/labels", headers=headers, params={"per_page": 100})
+            lr.raise_for_status()
+            existing = {str(l.get("name") or "").lower() for l in (lr.json() or []) if isinstance(l, dict)}
+            if "kanlytics:phase".lower() not in existing:
+                cr = requests.post(f"https://api.github.com/repos/{owner}/{name}/labels", headers=headers, json={"name": "kanlytics:phase", "color": "BFDADC"})
+                # ignore failure (permissions)
+                if cr.status_code >= 400:
+                    pass
+        except Exception:
+            pass
+
+        if issue_url:
+            _, _, num = GitHubProjectV2.parse_issue_url(issue_url)
+            pr = requests.patch(
+                f"https://api.github.com/repos/{owner}/{name}/issues/{num}",
+                headers=headers,
+                json={"title": phase, "body": body, "labels": ["kanlytics:phase"]},
+            )
+            pr.raise_for_status()
+            issue_url = (pr.json() or {}).get("html_url") or issue_url
+        else:
+            cr = requests.post(
+                f"https://api.github.com/repos/{owner}/{name}/issues",
+                headers=headers,
+                json={"title": phase, "body": body, "labels": ["kanlytics:phase"]},
+            )
+            cr.raise_for_status()
+            issue_url = (cr.json() or {}).get("html_url")
+            if not issue_url:
+                raise ValueError("Issue creation succeeded but no html_url returned")
+
+        # We don't have a project item id; reuse URL as stable identifier for UI.
+        return GetPhaseMetaCsvOutput(
+            phase=phase,
+            task_id=phase_task_id,
+            item_id=issue_url,
+            type="Issue",
+            issue_url=issue_url,
+            title=phase,
+            description=description,
+            body=body,
+        )
+
+    def update_phase_meta_csv(self, payload: UpdatePhaseMetaCsvInput) -> UpdatePhaseMetaCsvOutput:
+        # Update is just get + overwrite description in body + patch.
+        got = self.get_phase_meta_csv(GetPhaseMetaCsvInput(repo=payload.repo, project_name=payload.project_name, csv_text=payload.csv_text, phase=payload.phase))
+
+        import requests
+        from kanlytics.core.github_project_v2 import GitHubProjectV2, detect_github_token, parse_repo_ref
+
+        token = detect_github_token()
+        if not token:
+            raise ValueError("GitHub token required (set in config.ini or env var like GITHUB_TOKEN)")
+        headers = {
+            "Authorization": f"token {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "kanlytics/1.0",
+        }
+        owner, name = parse_repo_ref(payload.repo)
+        issue_url = (got.issue_url or "").strip()
+        if not issue_url:
+            raise ValueError("Phase meta issue URL missing.")
+        _, _, num = GitHubProjectV2.parse_issue_url(issue_url)
+
+        # Rebuild body using the existing checklist section from got.body, but with new description.
+        lines = got.body.splitlines()
+        checklist_idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith("- [ ]"):
+                checklist_idx = i
+                break
+        checklist = lines[checklist_idx:] if checklist_idx is not None else []
+
+        phase = got.phase
+        description = (payload.description or "").strip()
+        marker = f"{PHASE_META_MARKER} id={got.task_id}"
+
+        parts: list[str] = [marker, f"## {phase}"]
+        if description:
+            parts.append("")
+            parts.extend(description.splitlines())
+        parts.append("")
+        parts.extend(checklist)
+        body = "\n".join(parts).strip() + "\n"
+
+        pr = requests.patch(
+            f"https://api.github.com/repos/{owner}/{name}/issues/{num}",
+            headers=headers,
+            json={"title": phase, "body": body, "labels": ["kanlytics:phase"]},
+        )
+        pr.raise_for_status()
+        issue_url2 = (pr.json() or {}).get("html_url") or issue_url
+
+        return UpdatePhaseMetaCsvOutput(
+            phase=phase,
+            task_id=got.task_id,
+            item_id=issue_url2,
+            type="Issue",
+            issue_url=issue_url2,
+            title=phase,
+            description=description,
+            body=body,
+        )
+
     def connect_project_start(self, payload: ConnectProjectInput) -> StartJobOutput:
         """
         Start an async ProjectV2 connect job (for UI progress reporting).
@@ -1026,6 +1619,10 @@ class GanttService(Service):
                     if typename not in ("Issue", "DraftIssue") or not item_id:
                         continue
 
+                    body_text = (content.get("body") or "").strip()
+                    if PHASE_META_MARKER in body_text:
+                        continue
+
                     task_id = client._get_text_field_value(item, "Task ID")
                     if not task_id:
                         task_id = new_uuid()
@@ -1053,6 +1650,9 @@ class GanttService(Service):
                         labels = [n.get("name") for n in (content.get("labels") or {}).get("nodes", []) if (n or {}).get("name")]
                         assignees = [n.get("login") for n in (content.get("assignees") or {}).get("nodes", []) if (n or {}).get("login")]
                         number = content.get("number")
+                        repo_owner = ((content.get("repository") or {}).get("owner") or {}).get("login")
+                        repo_name = (content.get("repository") or {}).get("name")
+                        repo_ref = f"{repo_owner}/{repo_name}" if repo_owner and repo_name else None
                         issue = GitHubIssue(
                             task_id=task_id,
                             id=task_id,
@@ -1065,6 +1665,7 @@ class GanttService(Service):
                             updated_at=content.get("updatedAt"),
                             closed_at=content.get("closedAt"),
                             url=content.get("url"),
+                            repo=repo_ref,
                             labels=[l for l in labels if l],
                             assignees=[a for a in assignees if a],
                             phase=phase,
@@ -1200,6 +1801,7 @@ class GanttService(Service):
             body = (t.body or t.details or "").strip()
             labels = list(t.labels or [])
             assignees = list(t.assignees or [])
+            task_repo = (getattr(t, "repo", None) or "").strip() or None
 
             rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
 
@@ -1279,11 +1881,12 @@ class GanttService(Service):
                             assignees=assignees,
                         )
                         out.updated_issues += 1
-                    elif issue_repo:
+                    elif (task_repo or issue_repo):
                         # Create a real repo issue, add to project, then update fields.
-                        labels_safe = client.ensure_labels_exist(repo=issue_repo, labels=labels)
+                        target_repo = task_repo or issue_repo
+                        labels_safe = client.ensure_labels_exist(repo=target_repo, labels=labels)
                         created_url = client.create_issue_rest(
-                            repo=issue_repo,
+                            repo=target_repo,
                             title=title or "(untitled)",
                             body=body,
                             labels=labels_safe,
@@ -1329,6 +1932,139 @@ class GanttService(Service):
                         out.created_draft_issues += 1
             except Exception as e:
                 out.errors.append(f"{task_id}: {e}")
+
+        # --- Phase meta issues (one per phase) ---
+        try:
+            from uuid import NAMESPACE_URL, uuid5
+
+            # Group tasks by phase
+            tasks_by_phase: dict[str, list[Any]] = {}
+            for t in gantt.tasks:
+                ph = (getattr(t, "phase", None) or "Unphased").strip() or "Unphased"
+                tasks_by_phase.setdefault(ph, []).append(t)
+
+            # Choose a default repo for meta issues when not explicitly provided.
+            default_meta_repo: Optional[str] = issue_repo
+            if not default_meta_repo:
+                for t in gantt.tasks:
+                    if getattr(t, "url", None):
+                        try:
+                            owner, repo, _ = client.parse_issue_url(t.url)
+                            default_meta_repo = f"{owner}/{repo}"
+                            break
+                        except Exception:
+                            continue
+
+            def _phase_major_for(ts: list[Any]) -> Optional[int]:
+                import re
+
+                majors: list[int] = []
+                for x in ts:
+                    s = (getattr(x, "display_task_id", None) or "").strip()
+                    m = re.match(r"^(\d+)\.(\d+)$", s)
+                    if m:
+                        majors.append(int(m.group(1)))
+                if not majors:
+                    return None
+                return max(set(majors), key=lambda v: (majors.count(v), -v))
+
+            def _format_ref(meta_repo: Optional[str], issue_url: str) -> str:
+                owner, repo, number = client.parse_issue_url(issue_url)
+                if meta_repo and meta_repo.lower() == f"{owner}/{repo}".lower():
+                    return f"#{number}"
+                return f"{owner}/{repo}#{number}"
+
+            for phase, ts in tasks_by_phase.items():
+                # Deterministic Task ID for phase meta issue so we can update it idempotently.
+                phase_task_id = str(uuid5(NAMESPACE_URL, f"kanlytics:phase:{payload.project_url}:{phase}"))
+                rec = by_task_id.get(phase_task_id)
+
+                meta_repo = default_meta_repo
+                if rec and rec.get("issue_url"):
+                    try:
+                        owner, repo, _ = client.parse_issue_url(rec["issue_url"])
+                        meta_repo = f"{owner}/{repo}"
+                    except Exception:
+                        pass
+                title = phase
+
+                # Build checklist body
+                lines: list[str] = [PHASE_META_MARKER, f"## {phase}", ""]
+                # Stable ordering: by display_task_id when present, else by title
+                ts_sorted = ts[:]
+                ts_sorted.sort(key=lambda x: ((getattr(x, "display_task_id", None) or "").strip(), (getattr(x, "title", None) or getattr(x, "name", "")).strip().lower()))
+                for x in ts_sorted:
+                    xt = (getattr(x, "title", None) or getattr(x, "name", "") or "").strip() or "(untitled)"
+                    xurl = (getattr(x, "url", None) or "").strip()
+                    if xurl:
+                        ref = _format_ref(meta_repo, xurl)
+                        lines.append(f"- [ ] {ref} {xt}")
+                    else:
+                        disp = (getattr(x, "display_task_id", None) or getattr(x, "task_id", None) or getattr(x, "id", None) or "").strip()
+                        if disp:
+                            lines.append(f"- [ ] {disp} {xt}")
+                        else:
+                            lines.append(f"- [ ] {xt}")
+                body = "\n".join(lines).strip() + "\n"
+
+                # Create/update meta issue item
+                if rec:
+                    # Ensure identifying fields
+                    client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=phase_task_id)
+                    mj = _phase_major_for(ts)
+                    if mj is not None:
+                        client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=f"{mj}.0")
+                    client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=phase)
+                    client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text="")
+                    client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text="0")
+                    client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text="0")
+                    client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids["Backlog"])
+                    project_name_value = (payload.project_name or "").strip()
+                    if project_name_field_id and project_name_value:
+                        client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
+
+                    if rec["type"] == "Issue":
+                        issue_url = rec.get("issue_url")
+                        if issue_url:
+                            owner, repo, _ = client.parse_issue_url(issue_url)
+                            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=["kanlytics:phase"])
+                            client.update_issue_rest(issue_url=issue_url, title=title, body=body, labels=labels_safe, assignees=[])
+                    else:
+                        draft_id = rec.get("draft_issue_id")
+                        if draft_id:
+                            client.update_draft_issue(draft_issue_id=draft_id, title=title, body=body)
+                else:
+                    # Prefer creating a real issue so we can use #123 references.
+                    created_item_id: Optional[str] = None
+                    if meta_repo:
+                        labels_safe = client.ensure_labels_exist(repo=meta_repo, labels=["kanlytics:phase"])
+                        created_url = client.create_issue_rest(repo=meta_repo, title=title, body=body, labels=labels_safe, assignees=[])
+                        try:
+                            owner2, repo2, _ = client.parse_issue_url(created_url)
+                            meta_repo = f"{owner2}/{repo2}"
+                        except Exception:
+                            pass
+                        owner, repo, number = client.parse_issue_url(created_url)
+                        issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                        created_item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                    else:
+                        created_item_id = client.add_draft_issue(title=title, body=body)
+
+                    if created_item_id:
+                        client.set_text_field(item_id=created_item_id, field_id=task_id_field_id, text=phase_task_id)
+                        mj = _phase_major_for(ts)
+                        if mj is not None:
+                            client.set_text_field(item_id=created_item_id, field_id=display_id_field_id, text=f"{mj}.0")
+                        client.set_text_field(item_id=created_item_id, field_id=phase_field_id, text=phase)
+                        client.set_text_field(item_id=created_item_id, field_id=deps_field_id, text="")
+                        client.set_text_field(item_id=created_item_id, field_id=wall_days_field_id, text="0")
+                        client.set_text_field(item_id=created_item_id, field_id=billable_days_field_id, text="0")
+                        client.set_single_select_field(item_id=created_item_id, field_id=status_field_id, option_id=status_option_ids["Backlog"])
+                        project_name_value = (payload.project_name or "").strip()
+                        if project_name_field_id and project_name_value:
+                            client.set_text_field(item_id=created_item_id, field_id=project_name_field_id, text=project_name_value)
+        except Exception as e:
+            out.errors.append(f"phase-meta: {e}")
 
         return out
 

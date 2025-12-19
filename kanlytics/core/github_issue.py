@@ -55,6 +55,12 @@ class GitHubIssue(BaseModel):
         default=None,
         description="GitHub issue URL (when sourced from GitHub). If provided and `id` is missing, `id` defaults to this.",
     )
+    repo: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("repo", "Repo"),
+        serialization_alias="repo",
+        description="Repository for this issue/task (owner/repo). Used when creating issues during export.",
+    )
 
     # -----------------------------
     # GitHub issue-like fields (optional for CSV/manual tasks)

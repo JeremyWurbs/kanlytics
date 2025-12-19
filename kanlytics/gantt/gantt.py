@@ -187,6 +187,7 @@ class Gantt:
                         "Assignees": get(r, "Assignees"),
                         "notes": get(r, "notes"),
                         "url": get(r, "url") or None,
+                        "repo": get(r, "repo") or get(r, "Repo") or None,
                         "number": (int(get(r, "number")) if get(r, "number").isdigit() else None),
                         "state": get(r, "state") or None,
                         "roles": roles,
@@ -462,7 +463,9 @@ class Gantt:
             g.schedule("2026-01-05")
             payload = g.export_layout()
         """
-        if not self._scheduled:
+        # Allow exporting an "empty" schedule (0 tasks) so new projects can still
+        # render an empty chart and allow adding phases/tasks.
+        if not self._scheduled and self._tasks:
             raise RuntimeError("No schedule computed. Call schedule(...) first.")
 
         tasks_out: List[Dict[str, Any]] = []
@@ -479,6 +482,7 @@ class Gantt:
                     "display_task_id": t.display_task_id,
                     "task_id": t.task_id,
                     "url": t.url,
+                    "repo": getattr(t, "repo", None),
                     "number": t.number,
                     "state": t.state,
                     "labels": list(t.labels or []),
@@ -613,6 +617,7 @@ class Gantt:
             "Display Task ID",
             "Task ID",
             "url",
+            "repo",
             "number",
             "state",
             "project_name",
@@ -642,6 +647,7 @@ class Gantt:
                     "Display Task ID": t.display_task_id or "",
                     "Task ID": t.task_id or "",
                     "url": t.url or "",
+                    "repo": getattr(t, "repo", "") or "",
                     "number": "" if t.number is None else str(t.number),
                     "state": t.state or "",
                     "project_name": getattr(t, "project_name", "") or "",
