@@ -1,138 +1,105 @@
 # Kanlytics
 
-A Python library for analyzing GitHub repository issues with advanced features including time estimation extraction, project board status tracking, and assignee analysis.
+Kanlytics is a local-first project planning tool that can **import/export** between:
+
+- **CSV (V2)** project plans
+- **GitHub Projects (ProjectV2)** + Issues (including round-trippable planning fields)
+
+It includes a browser-based UI for editing/scheduling and a Python backend that talks to GitHub.
 
 ## Features
 
-- **Repository Analysis**: Pull all issues from any GitHub repository
-- **Time Estimation**: Automatically extract time estimates from issue descriptions using pattern matching
-- **Project Board Integration**: Track issue status history from GitHub project boards (requires authentication)
-- **Assignee Tracking**: Analyze issue distribution by assignee
-- **Status History**: Monitor issue progression through project board statuses
-- **Configurable**: Works with both public and private repositories
+- **Gantt chart UI**: schedule tasks, view phases, critical path/slack, and export views (including PNG)
+- **GitHub sync**: pull from / push to GitHub ProjectV2 boards and Issues
+- **Multi-project support**: save/load projects and view multiple projects together
+- **Local persistence**: projects are stored in a registry at `~/.cache/kanlytics/projects` (mounted as a volume in Docker)
 
-## Installation
+## Authentication (GitHub PAT)
+
+Kanlytics can read a GitHub token from several sources:
+
+- **Environment variables**: `GITHUB_TOKEN`, `GITHUB_PAT`, `GITHUB_ACCESS_TOKEN`, `GH_TOKEN`
+- **Config file** (dev-only; don’t ship secrets in images): `kanlytics/core/config.ini`
+
+For Docker deployments, we recommend providing the token via a **Docker secret file**, mounted at:
+
+- `/run/secrets/kanlytics_github_pat`
+
+The container entrypoint reads that secret file and exports it as `GITHUB_TOKEN`.
+
+## Option 1: Run from source (`git clone`)
+
+### Requirements
+
+- Python **3.12+**
+- Node **20+**
+- [`uv`](https://github.com/astral-sh/uv) (recommended)
+
+### Backend (FastAPI via Mindtrace Service)
+
+Start the backend on port `8080`:
 
 ```bash
-pip install -r requirements.txt
+uv run python -c "from kanlytics.gantt.gantt_service import GanttService; GanttService.launch(url='http://0.0.0.0:8080/', timeout=15)"
 ```
 
-## Quick Start
+### Frontend (Vite)
 
-### Basic Usage
+In another terminal:
 
-```python
-from kanlytics import Kanlytics
-
-# Analyze a public repository
-kanlytics = Kanlytics("https://github.com/Mindtrace/mindtrace")
-analysis = kanlytics.analyze_issues()
-
-print(f"Total issues: {analysis['total_issues']}")
-print(f"Open issues: {analysis['open_issues']}")
-print(f"Issues with time estimates: {analysis['issues_with_time_estimates']}")
+```bash
+cd kanlytics/frontend
+npm install
+VITE_API_BASE=http://localhost:8080 npm run dev -- --port 5173
 ```
 
-### Advanced Usage with Project Boards
+Then open: `http://localhost:5173/`
 
-```python
-# For private repositories and project board access
-kanlytics = Kanlytics(
-    "https://github.com/Mindtrace/mindtrace",
-    github_token="your_github_token",
-    project_id="your_project_id"
-)
+## Option 2: Run via Docker
 
-# Get issues with project board status history
-issues = kanlytics.get_issues_with_project_history()
-analysis = kanlytics.analyze_issues()
+Kanlytics currently runs **frontend + backend in a single container** (dev-style Vite server for now).
+
+### 2a) Recommended: `docker compose` (with a PAT secret + persistent project storage)
+
+1) Create a token file:
+
+- Put your Github PAT in `secrets/github_pat.txt` (this folder is ignored by git)
+
+2) Start:
+
+```bash
+docker compose up --build
 ```
 
-## API Reference
+3) Open: `http://localhost:5173/`
 
-### Kanlytics Class
+### 2b) `docker run` (mount a “secret file”)
 
-Main class for repository analysis.
-
-#### Constructor
-```python
-Kanlytics(repo_url: str, github_token: Optional[str] = None, project_id: Optional[str] = None)
+```bash
+docker build -f docker/Dockerfile -t kanlytics:local .
+docker run --rm \
+  -p 5173:5173 -p 8080:8080 \
+  --mount type=bind,src="$PWD/secrets/github_pat.txt",dst=/run/secrets/kanlytics_github_pat,ro \
+  kanlytics:local
 ```
 
-- `repo_url`: GitHub repository URL (e.g., 'https://github.com/owner/repo')
-- `github_token`: GitHub personal access token for private repos and project boards
-- `project_id`: GitHub project board ID for status history tracking
+Open: `http://localhost:5173/`
 
-#### Methods
+### Ports / configuration
 
-- `analyze_issues(state: str = "all")`: Analyze all issues and return comprehensive statistics
-- `get_issues_with_project_history(state: str = "all")`: Get issues with project board status history
+You can override ports via env vars (and update your port mappings accordingly):
 
-### GitHubIssue Class
+- `KANLYTICS_FRONTEND_PORT` (default `5173`)
+- `KANLYTICS_BACKEND_PORT` (default `8080`)
 
-Represents a GitHub issue with all associated information.
+If you use non-default ports, the container will also update backend CORS automatically via `KANLYTICS_CORS_ORIGINS`.
 
-#### Attributes
-- `number`: Issue number
-- `title`: Issue title
-- `body`: Issue description
-- `state`: Issue state (open/closed)
-- `created_at`: Creation timestamp
-- `updated_at`: Last update timestamp
-- `closed_at`: Close timestamp (if closed)
-- `assignees`: List of assignees
-- `labels`: List of labels
-- `time_estimate`: Extracted time estimate
-- `status_history`: Project board status history
-- `url`: Issue URL
+## Docker Hub (pre-built image)
 
-### GitHubRepository Class
+If/when you’re using a pre-built Docker Hub image, you can:
 
-Handles GitHub API interactions.
-
-#### Methods
-- `get_issues(state: str = "all")`: Pull all issues from repository
-- `get_issue_with_project_history(issue_number: int, project_id: Optional[str])`: Get specific issue with project history
-- `get_project_status_history(issue_number: int, project_id: str)`: Get project board status history for an issue
-
-## Time Estimate Extraction
-
-The library automatically extracts time estimates from issue descriptions using common patterns:
-
-- "time estimate: 2 hours"
-- "estimated time: 1 day"
-- "effort: 3 days"
-- "story points: 5"
-- "points: 8"
-
-## Authentication
-
-The library automatically detects GitHub tokens from multiple sources:
-
-1. **Config File** - `kanlytics/core/config.ini` (github_pat)
-2. **Environment Variables** - `GITHUB_TOKEN`, `GITHUB_PAT`, `GITHUB_ACCESS_TOKEN`, `GH_TOKEN`
-3. **Git Configuration** - `git config github.token`
-4. **GitHub CLI** - `gh auth token`
-5. **Git Credential Store** - `git credential fill`
-6. **Explicit Token** - Passed directly to constructor
-
-## Project Board Integration
-
-To use project board features:
-
-1. Create a GitHub Personal Access Token with `read:org` and `read:project` permissions
-2. Get your project board ID from the project URL
-3. Pass both to the Kanlytics constructor
-
-## Example
-
-See `example.py` for a complete usage example.
-
-## Requirements
-
-- Python 3.7+
-- requests>=2.31.0
+- Replace `image: kanlytics:local` in `docker-compose.yml` with your published tag, and remove the `build:` section.
 
 ## License
 
-See LICENSE file for details.
+See `LICENSE`.
