@@ -3,7 +3,7 @@ import json
 import requests
 from pathlib import Path
 
-from kanlytics.gantt.gantt_service import GanttService
+from kanlytics.gantt.gantt_service import KanlyticsBackend
 
 
 BASE_URL = "http://localhost:8080"
@@ -15,8 +15,8 @@ def main():
     # ------------------------------------------------------------------
     # 1. Launch service
     # ------------------------------------------------------------------
-    print("Launching GanttService...")
-    cm = GanttService.launch(url=BASE_URL)
+    print("Launching KanlyticsBackend...")
+    cm = KanlyticsBackend.launch(url=BASE_URL)
     print("Service is up.")
 
     # ------------------------------------------------------------------

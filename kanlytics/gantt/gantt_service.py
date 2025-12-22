@@ -434,9 +434,9 @@ job_status_task = TaskSchema(
 # Service
 # ----------------------------
 
-class GanttService(Service):
+class KanlyticsBackend(Service):
     """
-    Mindtrace Service wrapper for Gantt backend.
+    Mindtrace Service wrapper for the Kanlytics backend.
 
     Endpoints:
       - gantt.create_plan

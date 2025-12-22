@@ -40,7 +40,7 @@ The container entrypoint reads that secret file and exports it as `GITHUB_TOKEN`
 Start the backend on port `8080`:
 
 ```bash
-uv run python -c "from kanlytics.gantt.gantt_service import GanttService; GanttService.launch(url='http://0.0.0.0:8080/', timeout=15)"
+uv run python -c "from kanlytics.gantt.gantt_service import KanlyticsBackend; KanlyticsBackend.launch(url='http://0.0.0.0:8080/', timeout=15)"
 ```
 
 ### Frontend (Vite)

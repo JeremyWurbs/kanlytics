@@ -1,6 +1,6 @@
 # Gantt Frontend (React + Vite)
 
-A minimal React frontend that talks to your Mindtrace-backed `GanttService`.
+A minimal React frontend that talks to your Mindtrace-backed `KanlyticsBackend`.
 
 ## Prereqs
 - Node.js 18+ recommended
