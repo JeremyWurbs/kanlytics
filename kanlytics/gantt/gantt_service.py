@@ -2000,6 +2000,21 @@ class KanlyticsBackend(Service):
                         pass
                 title = phase
 
+                # Meta schedule range: earliest sub-task start to latest sub-task end (if available).
+                meta_start: Optional[str] = None
+                meta_end: Optional[str] = None
+                for x in ts:
+                    xid = getattr(x, "id", None)
+                    if not xid:
+                        continue
+                    sch = schedule_by_id.get(str(xid)) or {}
+                    s = sch.get("start")
+                    e = sch.get("end")
+                    if s:
+                        meta_start = s if meta_start is None else min(meta_start, s)
+                    if e:
+                        meta_end = e if meta_end is None else max(meta_end, e)
+
                 # Build checklist body
                 lines: list[str] = [PHASE_META_MARKER, f"## {phase}", ""]
                 # Stable ordering: by display_task_id when present, else by title
@@ -2031,6 +2046,10 @@ class KanlyticsBackend(Service):
                     client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text="0")
                     client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text="0")
                     client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids["Backlog"])
+                    if meta_start:
+                        client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=meta_start)
+                    if meta_end:
+                        client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=meta_end)
                     project_name_value = (payload.project_name or "").strip()
                     if project_name_field_id and project_name_value:
                         client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
@@ -2072,6 +2091,10 @@ class KanlyticsBackend(Service):
                         client.set_text_field(item_id=created_item_id, field_id=wall_days_field_id, text="0")
                         client.set_text_field(item_id=created_item_id, field_id=billable_days_field_id, text="0")
                         client.set_single_select_field(item_id=created_item_id, field_id=status_field_id, option_id=status_option_ids["Backlog"])
+                        if meta_start:
+                            client.set_date_field(item_id=created_item_id, field_id=start_date_field_id, date=meta_start)
+                        if meta_end:
+                            client.set_date_field(item_id=created_item_id, field_id=end_date_field_id, date=meta_end)
                         project_name_value = (payload.project_name or "").strip()
                         if project_name_field_id and project_name_value:
                             client.set_text_field(item_id=created_item_id, field_id=project_name_field_id, text=project_name_value)
@@ -2286,6 +2309,170 @@ class KanlyticsBackend(Service):
                                     out.created_draft_issues += 1
                     except Exception as e:
                         out.errors.append(f"{task_id}: {e}")
+
+                # --- Phase meta issues (one per phase) ---
+                # Ensure each phase has a corresponding "meta issue" on the project board.
+                try:
+                    from uuid import NAMESPACE_URL, uuid5
+
+                    # Group tasks by phase
+                    tasks_by_phase: dict[str, list[Any]] = {}
+                    for t in gantt.tasks:
+                        ph = (getattr(t, "phase", None) or "Unphased").strip() or "Unphased"
+                        tasks_by_phase.setdefault(ph, []).append(t)
+
+                    # Choose a default repo for meta issues when not explicitly provided.
+                    default_meta_repo: Optional[str] = issue_repo
+                    if not default_meta_repo:
+                        for t in gantt.tasks:
+                            if getattr(t, "url", None):
+                                try:
+                                    owner, repo, _ = client.parse_issue_url(t.url)
+                                    default_meta_repo = f"{owner}/{repo}"
+                                    break
+                                except Exception:
+                                    continue
+
+                    def _phase_major_for(ts: list[Any]) -> Optional[int]:
+                        import re
+
+                        majors: list[int] = []
+                        for x in ts:
+                            s = (getattr(x, "display_task_id", None) or "").strip()
+                            m = re.match(r"^(\d+)\.(\d+)$", s)
+                            if m:
+                                majors.append(int(m.group(1)))
+                        if not majors:
+                            return None
+                        return max(set(majors), key=lambda v: (majors.count(v), -v))
+
+                    def _format_ref(meta_repo: Optional[str], issue_url: str) -> str:
+                        owner, repo, number = client.parse_issue_url(issue_url)
+                        if meta_repo and meta_repo.lower() == f"{owner}/{repo}".lower():
+                            return f"#{number}"
+                        return f"{owner}/{repo}#{number}"
+
+                    self._job_update(job_id, progress=96, message="Updating phase meta issues…")
+
+                    for phase, ts in tasks_by_phase.items():
+                        # Deterministic Task ID for phase meta issue so we can update it idempotently.
+                        phase_task_id = str(uuid5(NAMESPACE_URL, f"kanlytics:phase:{payload.project_url}:{phase}"))
+                        rec = by_task_id.get(phase_task_id)
+
+                        meta_repo = default_meta_repo
+                        if rec and rec.get("issue_url"):
+                            try:
+                                owner, repo, _ = client.parse_issue_url(rec["issue_url"])
+                                meta_repo = f"{owner}/{repo}"
+                            except Exception:
+                                pass
+                        title = phase
+
+                        # Meta schedule range: earliest sub-task start to latest sub-task end (if available).
+                        meta_start: Optional[str] = None
+                        meta_end: Optional[str] = None
+                        for x in ts:
+                            xid = getattr(x, "id", None)
+                            if not xid:
+                                continue
+                            sch = schedule_by_id.get(str(xid)) or {}
+                            s = sch.get("start")
+                            e = sch.get("end")
+                            if s:
+                                meta_start = s if meta_start is None else min(meta_start, s)
+                            if e:
+                                meta_end = e if meta_end is None else max(meta_end, e)
+
+                        # Build checklist body
+                        lines: list[str] = [PHASE_META_MARKER, f"## {phase}", ""]
+                        ts_sorted = ts[:]
+                        ts_sorted.sort(
+                            key=lambda x: (
+                                (getattr(x, "display_task_id", None) or "").strip(),
+                                (getattr(x, "title", None) or getattr(x, "name", "")).strip().lower(),
+                            )
+                        )
+                        for x in ts_sorted:
+                            xt = (getattr(x, "title", None) or getattr(x, "name", "") or "").strip() or "(untitled)"
+                            xurl = (getattr(x, "url", None) or "").strip()
+                            if xurl:
+                                ref = _format_ref(meta_repo, xurl)
+                                lines.append(f"- [ ] {ref} {xt}")
+                            else:
+                                disp = (
+                                    (getattr(x, "display_task_id", None) or getattr(x, "task_id", None) or getattr(x, "id", None) or "")
+                                    .strip()
+                                )
+                                if disp:
+                                    lines.append(f"- [ ] {disp} {xt}")
+                                else:
+                                    lines.append(f"- [ ] {xt}")
+                        body = "\n".join(lines).strip() + "\n"
+
+                        if rec:
+                            client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=phase_task_id)
+                            mj = _phase_major_for(ts)
+                            if mj is not None:
+                                client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=f"{mj}.0")
+                            client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=phase)
+                            client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text="")
+                            client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text="0")
+                            client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text="0")
+                            client.set_single_select_field(
+                                item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids["Backlog"]
+                            )
+                            if meta_start:
+                                client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=meta_start)
+                            if meta_end:
+                                client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=meta_end)
+                            project_name_value = (payload.project_name or "").strip()
+                            if project_name_field_id and project_name_value:
+                                client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
+
+                            if rec["type"] == "Issue":
+                                issue_url = rec.get("issue_url")
+                                if issue_url:
+                                    owner, repo, _ = client.parse_issue_url(issue_url)
+                                    labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=["kanlytics:phase"])
+                                    client.update_issue_rest(issue_url=issue_url, title=title, body=body, labels=labels_safe, assignees=[])
+                            else:
+                                draft_id = rec.get("draft_issue_id")
+                                if draft_id:
+                                    client.update_draft_issue(draft_issue_id=draft_id, title=title, body=body)
+                        else:
+                            created_item_id: Optional[str] = None
+                            if meta_repo:
+                                labels_safe = client.ensure_labels_exist(repo=meta_repo, labels=["kanlytics:phase"])
+                                created_url = client.create_issue_rest(
+                                    repo=meta_repo, title=title, body=body, labels=labels_safe, assignees=[]
+                                )
+                                owner, repo, number = client.parse_issue_url(created_url)
+                                issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                                created_item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                            else:
+                                created_item_id = client.add_draft_issue(title=title, body=body)
+
+                            if created_item_id:
+                                client.set_text_field(item_id=created_item_id, field_id=task_id_field_id, text=phase_task_id)
+                                mj = _phase_major_for(ts)
+                                if mj is not None:
+                                    client.set_text_field(item_id=created_item_id, field_id=display_id_field_id, text=f"{mj}.0")
+                                client.set_text_field(item_id=created_item_id, field_id=phase_field_id, text=phase)
+                                client.set_text_field(item_id=created_item_id, field_id=deps_field_id, text="")
+                                client.set_text_field(item_id=created_item_id, field_id=wall_days_field_id, text="0")
+                                client.set_text_field(item_id=created_item_id, field_id=billable_days_field_id, text="0")
+                                client.set_single_select_field(
+                                    item_id=created_item_id, field_id=status_field_id, option_id=status_option_ids["Backlog"]
+                                )
+                                if meta_start:
+                                    client.set_date_field(item_id=created_item_id, field_id=start_date_field_id, date=meta_start)
+                                if meta_end:
+                                    client.set_date_field(item_id=created_item_id, field_id=end_date_field_id, date=meta_end)
+                                project_name_value = (payload.project_name or "").strip()
+                                if project_name_field_id and project_name_value:
+                                    client.set_text_field(item_id=created_item_id, field_id=project_name_field_id, text=project_name_value)
+                except Exception as e:
+                    out.errors.append(f"phase-meta: {e}")
 
                 self._job_update(job_id, progress=98, message="Finalizing…")
                 # tiny delay so UI can show "finalizing" state
