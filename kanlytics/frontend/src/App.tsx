@@ -19,8 +19,9 @@ import {
   updatePhaseMeta,
   getPhaseMetaCsv,
   updatePhaseMetaCsv,
+  fetchTimelineStatus,
 } from "./api";
-import type { GanttLayout } from "./types";
+import type { GanttLayout, TimelineStatusResponse, TaskTimelineStatus } from "./types";
 import { GanttChart } from "./components/GanttChart";
 import "./styles.css";
 
@@ -209,6 +210,7 @@ export default function App() {
 
   const [planId, setPlanId] = useState<string>("");
   const [layout, setLayout] = useState<GanttLayout | null>(null);
+  const [timelineStatus, setTimelineStatus] = useState<TimelineStatusResponse | null>(null);
 
   const [busy, setBusy] = useState<boolean>(false);
   const [msg, setMsg] = useState<string>("");
@@ -313,6 +315,7 @@ export default function App() {
       setFileName("");
       setCsvText("");
       setLayout(null);
+      setTimelineStatus(null);
       setPlanId("");
       return;
     }
@@ -325,6 +328,7 @@ export default function App() {
       setFileName("");
       setCsvText("");
       setLayout(null);
+      setTimelineStatus(null);
       setPlanId("");
       return;
     }
@@ -338,6 +342,7 @@ export default function App() {
     setFileName(p.fileName || "");
     setCsvText(p.csvText || "");
     setLayout(null);
+    setTimelineStatus(null);
     setPlanId("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -802,6 +807,7 @@ export default function App() {
     // We'll drive scheduling manually; don't rely on the csvText-change auto effect.
     suppressAutoScheduleRef.current = true;
     setLayout(null);
+    setTimelineStatus(null);
     setPlanId("");
 
     try {
@@ -830,6 +836,15 @@ export default function App() {
       });
       setPlanId(created.plan_id);
       setLayout(scheduled.layout);
+
+      // Fetch timeline status for the critical tasks panel
+      try {
+        const tlStatus = await fetchTimelineStatus({ planId: created.plan_id });
+        setTimelineStatus(tlStatus);
+      } catch {
+        // Non-fatal: timeline status is supplementary
+        setTimelineStatus(null);
+      }
 
       lastScheduleKeyRef.current = JSON.stringify({
         planId: created.plan_id,
@@ -1015,6 +1030,7 @@ export default function App() {
     setIssueRepo(dr);
     setFileName("");
     setLayout(null);
+    setTimelineStatus(null);
     setPlanId("");
     const emptyCsv = [
       [
@@ -1097,6 +1113,7 @@ export default function App() {
     setErr("");
     setMsg("");
     setLayout(null);
+    setTimelineStatus(null);
     setPlanId("");
     setFileName(file.name);
     const text = await file.text();
@@ -1199,6 +1216,7 @@ export default function App() {
       const fallbackName = fn ? fn.replace(/\.csv$/i, "") : projectName.trim() || "Imported Project";
       ensureActiveProject({ name: projectName.trim() || fallbackName, fileName: fn || fileName });
       setLayout(null);
+      setTimelineStatus(null);
       setPlanId("");
       if (fn) setFileName(fn);
       setCsvText(res.csv_text || "");
@@ -1580,6 +1598,7 @@ export default function App() {
             const projectStart = String((result as any).project_start_date || "").trim();
             closeGithubModal();
             setLayout(null);
+            setTimelineStatus(null);
             setPlanId("");
             setFileName("github-project.csv");
             if (projectStart) setStartDate(projectStart);
@@ -1667,6 +1686,16 @@ export default function App() {
       });
 
       setLayout(scheduled.layout);
+
+      // Fetch timeline status for the critical tasks panel
+      try {
+        const tlStatus = await fetchTimelineStatus({ planId: created.plan_id });
+        setTimelineStatus(tlStatus);
+      } catch {
+        // Non-fatal: timeline status is supplementary
+        setTimelineStatus(null);
+      }
+
       showToast("success", `Scheduled ${created.task_count} tasks.`);
 
       // Prevent an immediate duplicate re-schedule when the effects run.
@@ -1698,6 +1727,15 @@ export default function App() {
         workingDays,
       });
       setLayout(scheduled.layout);
+
+      // Fetch timeline status for the critical tasks panel
+      try {
+        const tlStatus = await fetchTimelineStatus({ planId });
+        setTimelineStatus(tlStatus);
+      } catch {
+        // Non-fatal: timeline status is supplementary
+        setTimelineStatus(null);
+      }
     } catch (e: any) {
       // Keep reschedule failures visible but ephemeral.
       showToast("error", e?.message || String(e));
@@ -1884,7 +1922,130 @@ export default function App() {
         ) : null}
       </div>
 
+            {/* Milestones Panel */}
+            {layout && (() => {
+              const milestones = layout.tasks.filter(t => (t.durations?.wall ?? 1) === 0);
+              if (milestones.length === 0) return null;
+              milestones.sort((a, b) => (a.schedule.start || "").localeCompare(b.schedule.start || ""));
+              return (
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Milestones</div>
+                  <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>ID</th>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>Milestone</th>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>Phase</th>
+                          <th style={{ padding: "6px 10px", textAlign: "right", fontWeight: 600, color: "var(--muted-2)" }}>Date</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {milestones.map((m, idx) => (
+                          <tr key={m.id} style={{ background: idx % 2 === 0 ? "var(--card)" : "var(--bg)", borderBottom: idx < milestones.length - 1 ? "1px solid var(--border)" : "none" }}>
+                            <td style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>
+                              <span style={{ marginRight: 6 }}>◆</span>
+                              <span className="mono">{m.display_task_id || "—"}</span>
+                            </td>
+                            <td style={{ padding: "6px 10px", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {m.name || m.title || "(untitled)"}
+                            </td>
+                            <td style={{ padding: "6px 10px", color: "var(--muted)", whiteSpace: "nowrap" }}>{m.phase || "—"}</td>
+                            <td className="mono" style={{ padding: "6px 10px", textAlign: "right", whiteSpace: "nowrap" }}>{m.schedule.start || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Critical Tasks Panel */}
+            {layout && timelineStatus && (() => {
+              // Filter tasks that are Delayed or Critically Delayed
+              const criticalTasks = timelineStatus.tasks.filter(t => 
+                t.timeline_status === "Delayed" || t.timeline_status === "Critically Delayed"
+              );
+              
+              if (criticalTasks.length === 0) return null;
+              
+              // Sort: Critically Delayed first, then by deadline
+              criticalTasks.sort((a, b) => {
+                // Critically Delayed tasks first
+                if (a.timeline_status === "Critically Delayed" && b.timeline_status !== "Critically Delayed") return -1;
+                if (a.timeline_status !== "Critically Delayed" && b.timeline_status === "Critically Delayed") return 1;
+                // Then by deadline
+                const aDeadline = a.deadline || a.end_date || "";
+                const bDeadline = b.deadline || b.end_date || "";
+                return aDeadline.localeCompare(bDeadline);
+              });
+              
+              const getTimelineStatusStyle = (status: string) => {
+                switch (status) {
+                  case "Critically Delayed":
+                    return { color: "var(--gantt-critical)", fontWeight: 600 };
+                  case "Delayed":
+                    return { color: "var(--toast-error-text)" };
+                  default:
+                    return {};
+                }
+              };
+              
+              return (
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10, color: "var(--gantt-critical)" }}>
+                    Critical Tasks
+                  </div>
+                  <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>ID</th>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>Task</th>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>Phase</th>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>Status</th>
+                          <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: "var(--muted-2)" }}>Timeline Status</th>
+                          <th style={{ padding: "6px 10px", textAlign: "right", fontWeight: 600, color: "var(--muted-2)" }}>Deadline</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {criticalTasks.map((t, idx) => {
+                          const isCriticallyDelayed = t.timeline_status === "Critically Delayed";
+                          
+                          return (
+                            <tr
+                              key={t.task_id}
+                              style={{
+                                background: isCriticallyDelayed ? "var(--toast-error-bg)" : (idx % 2 === 0 ? "var(--card)" : "var(--bg)"),
+                                borderBottom: idx < criticalTasks.length - 1 ? "1px solid var(--border)" : "none",
+                              }}
+                            >
+                              <td className="mono" style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>{t.display_task_id || "—"}</td>
+                              <td style={{ padding: "6px 10px", maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {t.name || "(untitled)"}
+                              </td>
+                              <td style={{ padding: "6px 10px", color: "var(--muted)", whiteSpace: "nowrap" }}>{t.phase || "—"}</td>
+                              <td style={{ padding: "6px 10px", whiteSpace: "nowrap" }}>{t.status || "Backlog"}</td>
+                              <td style={{ padding: "6px 10px", whiteSpace: "nowrap", ...getTimelineStatusStyle(t.timeline_status) }}>
+                                {t.timeline_status}
+                              </td>
+                              <td className="mono" style={{ padding: "6px 10px", textAlign: "right", whiteSpace: "nowrap", color: isCriticallyDelayed ? "var(--toast-error-text)" : "inherit" }}>
+                                {t.deadline || t.end_date || "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Project Timeline */}
             <div className="card">
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>Project Timeline</div>
               {!layout ? (
                 <div className="small">
                   No project loaded yet. Use <b>Import Project</b> to load a CSV or pull from GitHub to see the project view.
@@ -2003,6 +2164,7 @@ export default function App() {
                                 setFileName("");
                                 setCsvText("");
                                 setLayout(null);
+                                setTimelineStatus(null);
                                 setPlanId("");
                               }
                             }}

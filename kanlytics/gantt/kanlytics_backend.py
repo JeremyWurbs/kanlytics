@@ -376,6 +376,47 @@ critical_path_task = TaskSchema(
     output_schema=CriticalPathOutput,
 )
 
+
+class TimelineStatusInput(BaseModel):
+    plan_id: str
+    current_date: Optional[str] = Field(
+        default=None,
+        description="Current date in ISO format YYYY-MM-DD. Defaults to today if not provided.",
+    )
+
+
+class TaskTimelineStatus(BaseModel):
+    task_id: str
+    display_task_id: Optional[str] = None
+    name: str
+    phase: Optional[str] = None
+    status: str = Field(..., description="Original task status (Backlog, Planned, In Progress, In Review, Done).")
+    timeline_status: Literal["Scheduled", "In Development", "Delayed", "Critically Delayed", "Complete"] = Field(
+        ...,
+        description="Computed timeline status based on schedule vs actual progress.",
+    )
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    slack_days: Optional[float] = None
+    is_critical: bool = False
+    deadline: Optional[str] = Field(
+        default=None,
+        description="Effective deadline (end_date + slack_days) for non-critical tasks.",
+    )
+
+
+class TimelineStatusOutput(BaseModel):
+    plan_id: str
+    current_date: str
+    tasks: list[TaskTimelineStatus] = Field(default_factory=list)
+
+
+timeline_status_task = TaskSchema(
+    name="gantt.timeline_status",
+    input_schema=TimelineStatusInput,
+    output_schema=TimelineStatusOutput,
+)
+
 connect_project_task = TaskSchema(
     name="github.connect_project",
     input_schema=ConnectProjectInput,
@@ -489,6 +530,7 @@ class KanlyticsBackend(Service):
         self.add_endpoint("gantt.schedule", self.schedule, schema=schedule_task)
         self.add_endpoint("gantt.layout", self.get_layout, schema=layout_task)
         self.add_endpoint("gantt.critical_path", self.get_critical_path, schema=critical_path_task)
+        self.add_endpoint("gantt.timeline_status", self.get_timeline_status, schema=timeline_status_task)
         self.add_endpoint("github.connect_project", self.connect_project, schema=connect_project_task)
         self.add_endpoint("github.export_project", self.export_project, schema=export_project_task)
         self.add_endpoint("github.connect_project_start", self.connect_project_start, schema=connect_project_start_task)
@@ -992,6 +1034,139 @@ class KanlyticsBackend(Service):
 
         critical_path = list((layout.get("meta") or {}).get("critical_path") or [])
         return CriticalPathOutput(plan_id=payload.plan_id, critical_path=critical_path)
+
+    def get_timeline_status(self, payload: TimelineStatusInput) -> TimelineStatusOutput:
+        """
+        Compute the Timeline Status for each task based on schedule vs actual progress.
+
+        Timeline Status definitions:
+          - Scheduled: Task not started yet, status is Backlog or Planned
+          - In Development: Task has begun (status is In Progress or In Review)
+          - Delayed: Start Date passed but still Backlog/Planned, OR End Date passed and not Done
+          - Critically Delayed: Delayed AND impacting project completion (on critical path or slack exhausted)
+          - Complete: Task status is Done
+        """
+        from datetime import date, datetime
+
+        with self._lock:
+            layout = self._layouts.get(payload.plan_id)
+
+        if layout is None:
+            raise ValueError(
+                f"No layout found for plan_id={payload.plan_id}. "
+                f"Did you call gantt.schedule first?"
+            )
+
+        # Determine current date
+        if payload.current_date:
+            current_date_str = payload.current_date.strip()
+        else:
+            current_date_str = date.today().isoformat()
+
+        def parse_date(s: str) -> date | None:
+            if not s:
+                return None
+            try:
+                return datetime.strptime(s.strip(), "%Y-%m-%d").date()
+            except Exception:
+                return None
+
+        current_date = parse_date(current_date_str)
+        if current_date is None:
+            current_date = date.today()
+            current_date_str = current_date.isoformat()
+
+        # Get critical path task IDs
+        critical_path_ids = set((layout.get("meta") or {}).get("critical_path") or [])
+
+        results: list[TaskTimelineStatus] = []
+
+        for t in layout.get("tasks") or []:
+            task_id = t.get("id") or ""
+            display_task_id = t.get("display_task_id") or t.get("display_id")
+            name = t.get("name") or t.get("title") or "(untitled)"
+            phase = t.get("phase")
+            status = (t.get("status") or "Backlog").strip()
+            schedule = t.get("schedule") or {}
+            start_date_str = schedule.get("start") or ""
+            end_date_str = schedule.get("end") or ""
+            slack_days = t.get("slack_days") or 0.0
+            is_critical = t.get("is_critical") or (task_id in critical_path_ids)
+
+            start_date = parse_date(start_date_str)
+            end_date = parse_date(end_date_str)
+
+            # Compute effective deadline (end_date + slack_days)
+            deadline_str: str | None = None
+            if end_date:
+                from datetime import timedelta
+                deadline_date = end_date + timedelta(days=int(slack_days))
+                deadline_str = deadline_date.isoformat()
+
+            # Determine Timeline Status
+            status_lower = status.lower()
+
+            # Rule 6: Complete - task is Done
+            if status_lower == "done":
+                timeline_status = "Complete"
+
+            # Rule 2: In Development - task has begun (In Progress or In Review)
+            elif status_lower in ("in progress", "in review"):
+                timeline_status = "In Development"
+
+            # Rules 3, 4, 5: Check for delays
+            elif status_lower in ("backlog", "planned"):
+                is_delayed = False
+
+                # Rule 3: Start Date passed but status is still Backlog or Planned
+                if start_date and current_date > start_date:
+                    is_delayed = True
+
+                # Rule 4: End Date passed and task is not Done (already checked status is backlog/planned)
+                if end_date and current_date > end_date:
+                    is_delayed = True
+
+                if is_delayed:
+                    # Rule 5: Critically Delayed if impacting project completion
+                    # (on critical path OR slack exhausted)
+                    if is_critical:
+                        timeline_status = "Critically Delayed"
+                    elif deadline_str:
+                        deadline_date = parse_date(deadline_str)
+                        if deadline_date and current_date > deadline_date:
+                            # Slack exhausted - this delay impacts the project
+                            timeline_status = "Critically Delayed"
+                        else:
+                            timeline_status = "Delayed"
+                    else:
+                        timeline_status = "Delayed"
+                else:
+                    # Rule 1: Scheduled - task not started yet
+                    timeline_status = "Scheduled"
+
+            else:
+                # Unknown status - treat as Scheduled
+                timeline_status = "Scheduled"
+
+            results.append(TaskTimelineStatus(
+                task_id=task_id,
+                display_task_id=display_task_id,
+                name=name,
+                phase=phase,
+                status=status,
+                timeline_status=timeline_status,
+                start_date=start_date_str or None,
+                end_date=end_date_str or None,
+                slack_days=slack_days if slack_days else None,
+                is_critical=is_critical,
+                deadline=deadline_str,
+            ))
+
+        return TimelineStatusOutput(
+            plan_id=payload.plan_id,
+            current_date=current_date_str,
+            tasks=results,
+        )
 
     def connect_project(self, payload: ConnectProjectInput) -> ConnectProjectOutput:
         """

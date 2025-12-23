@@ -103,3 +103,25 @@ export type JobStatusResponse = {
   result?: Record<string, any> | null;
   error?: string | null;
 };
+
+export type TimelineStatus = "Scheduled" | "In Development" | "Delayed" | "Critically Delayed" | "Complete";
+
+export type TaskTimelineStatus = {
+  task_id: string;
+  display_task_id?: string | null;
+  name: string;
+  phase?: string | null;
+  status: string;
+  timeline_status: TimelineStatus;
+  start_date?: string | null;
+  end_date?: string | null;
+  slack_days?: number | null;
+  is_critical: boolean;
+  deadline?: string | null;
+};
+
+export type TimelineStatusResponse = {
+  plan_id: string;
+  current_date: string;
+  tasks: TaskTimelineStatus[];
+};

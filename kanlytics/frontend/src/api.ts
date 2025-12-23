@@ -15,6 +15,7 @@ import type {
   DeleteTaskResponse,
   GetPhaseMetaResponse,
   UpdatePhaseMetaResponse,
+  TimelineStatusResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
@@ -203,4 +204,14 @@ export async function startExportProject(params: { planId: string; projectUrl: s
 
 export async function fetchJobStatus(jobId: string): Promise<JobStatusResponse> {
   return postJson<JobStatusResponse>("github.job_status", { job_id: jobId });
+}
+
+export async function fetchTimelineStatus(params: {
+  planId: string;
+  currentDate?: string;
+}): Promise<TimelineStatusResponse> {
+  return postJson<TimelineStatusResponse>("gantt.timeline_status", {
+    plan_id: params.planId,
+    current_date: params.currentDate,
+  });
 }
