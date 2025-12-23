@@ -3,7 +3,7 @@ import json
 import requests
 from pathlib import Path
 
-from kanlytics.gantt.gantt_service import KanlyticsBackend
+from kanlytics.gantt.kanlytics_backend import KanlyticsBackend
 
 
 BASE_URL = "http://localhost:8080"

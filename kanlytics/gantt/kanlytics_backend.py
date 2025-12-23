@@ -1,7 +1,8 @@
-# gantt_service.py
+# kanlytics_backend.py
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, Type, Literal
 from uuid import uuid4
 import threading
@@ -1804,6 +1805,21 @@ class KanlyticsBackend(Service):
 
         issue_repo = (payload.issue_repo or "").strip() or None
 
+        max_workers = int(os.getenv("KANLYTICS_GITHUB_EXPORT_WORKERS", "6") or "6")
+        if max_workers < 1:
+            max_workers = 1
+        issue_update_futures: dict[Any, str] = {}
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+
+        def _submit_issue_update(*, key: str, issue_url: str, title: str, body: str, labels: list[str], assignees: list[str]) -> None:
+            def work() -> None:
+                owner, repo, _ = client.parse_issue_url(issue_url)
+                labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
+                client.update_issue_rest(issue_url=issue_url, title=title, body=body, labels=labels_safe, assignees=assignees)
+
+            fut = pool.submit(work)
+            issue_update_futures[fut] = key
+
         for t in gantt.tasks:
             task_id = (t.task_id or t.id or "").strip()
             if not task_id:
@@ -1826,36 +1842,34 @@ class KanlyticsBackend(Service):
                 sch_end = sch.get("end")
                 project_name_value = (payload.project_name or getattr(t, "project_name", None) or "").strip()
                 if rec:
-                    # Ensure field is set (idempotent).
-                    client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
-                    if project_name_field_id:
-                        if project_name_value:
-                            client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
+                    updates: list[tuple[str, dict[str, Any]]] = []
+                    updates.append((task_id_field_id, {"text": task_id}))
+                    if project_name_field_id and project_name_value:
+                        updates.append((project_name_field_id, {"text": project_name_value}))
                     if getattr(t, "display_task_id", None):
-                        client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=str(t.display_task_id))
-                    client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=(t.phase or ""))
-                    client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text=",".join(t.dependencies or []))
-                    client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                    client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                    client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
+                        updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                    updates.append((phase_field_id, {"text": (t.phase or "")}))
+                    updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                    updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                    updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                    updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
                     if sch_start:
-                        client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=sch_start)
+                        updates.append((start_date_field_id, {"date": sch_start}))
                     if sch_end:
-                        client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=sch_end)
+                        updates.append((end_date_field_id, {"date": sch_end}))
+                    client.set_fields_bulk(item_id=rec["item_id"], updates=updates)
 
                     if rec["type"] == "Issue":
                         issue_url = t.url or rec.get("issue_url")
                         if issue_url:
-                            owner, repo, _ = client.parse_issue_url(issue_url)
-                            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
-                            client.update_issue_rest(
+                            _submit_issue_update(
+                                key=task_id,
                                 issue_url=issue_url,
                                 title=title or "(untitled)",
                                 body=body,
-                                labels=labels_safe,
+                                labels=labels,
                                 assignees=assignees,
                             )
-                            out.updated_issues += 1
                     else:
                         draft_id = rec.get("draft_issue_id")
                         if draft_id:
@@ -1867,32 +1881,32 @@ class KanlyticsBackend(Service):
                         owner, repo, number = client.parse_issue_url(t.url)
                         issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
                         item_id = client.add_issue_item(issue_node_id=issue_node_id)
-                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
-                        if project_name_field_id:
-                            if project_name_value:
-                                client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                        updates: list[tuple[str, dict[str, Any]]] = []
+                        updates.append((task_id_field_id, {"text": task_id}))
+                        if project_name_field_id and project_name_value:
+                            updates.append((project_name_field_id, {"text": project_name_value}))
                         if getattr(t, "display_task_id", None):
-                            client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
-                        client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
-                        client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
-                        client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                        client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                        client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                            updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                        updates.append((phase_field_id, {"text": (t.phase or "")}))
+                        updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                        updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                        updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                        updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
                         if sch_start:
-                            client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                            updates.append((start_date_field_id, {"date": sch_start}))
                         if sch_end:
-                            client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
+                            updates.append((end_date_field_id, {"date": sch_end}))
+                        client.set_fields_bulk(item_id=item_id, updates=updates)
                         out.added_existing_issues += 1
                         # best-effort update to match local fields
-                        labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
-                        client.update_issue_rest(
+                        _submit_issue_update(
+                            key=task_id,
                             issue_url=t.url,
                             title=title or "(untitled)",
                             body=body,
-                            labels=labels_safe,
+                            labels=labels,
                             assignees=assignees,
                         )
-                        out.updated_issues += 1
                     elif (task_repo or issue_repo):
                         # Create a real repo issue, add to project, then update fields.
                         target_repo = task_repo or issue_repo
@@ -1907,40 +1921,42 @@ class KanlyticsBackend(Service):
                         owner, repo, number = client.parse_issue_url(created_url)
                         issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
                         item_id = client.add_issue_item(issue_node_id=issue_node_id)
-                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
-                        if project_name_field_id:
-                            if project_name_value:
-                                client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                        updates: list[tuple[str, dict[str, Any]]] = []
+                        updates.append((task_id_field_id, {"text": task_id}))
+                        if project_name_field_id and project_name_value:
+                            updates.append((project_name_field_id, {"text": project_name_value}))
                         if getattr(t, "display_task_id", None):
-                            client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
-                        client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
-                        client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
-                        client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                        client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                        client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                            updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                        updates.append((phase_field_id, {"text": (t.phase or "")}))
+                        updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                        updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                        updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                        updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
                         if sch_start:
-                            client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                            updates.append((start_date_field_id, {"date": sch_start}))
                         if sch_end:
-                            client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
+                            updates.append((end_date_field_id, {"date": sch_end}))
+                        client.set_fields_bulk(item_id=item_id, updates=updates)
                         out.added_existing_issues += 1
                         out.updated_issues += 1
                     else:
                         item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
-                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
-                        if project_name_field_id:
-                            if project_name_value:
-                                client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
+                        updates: list[tuple[str, dict[str, Any]]] = []
+                        updates.append((task_id_field_id, {"text": task_id}))
+                        if project_name_field_id and project_name_value:
+                            updates.append((project_name_field_id, {"text": project_name_value}))
                         if getattr(t, "display_task_id", None):
-                            client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
-                        client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
-                        client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
-                        client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                        client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                        client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
+                            updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                        updates.append((phase_field_id, {"text": (t.phase or "")}))
+                        updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                        updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                        updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                        updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
                         if sch_start:
-                            client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
+                            updates.append((start_date_field_id, {"date": sch_start}))
                         if sch_end:
-                            client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
+                            updates.append((end_date_field_id, {"date": sch_end}))
+                        client.set_fields_bulk(item_id=item_id, updates=updates)
                         out.created_draft_issues += 1
             except Exception as e:
                 out.errors.append(f"{task_id}: {e}")
@@ -2037,29 +2053,36 @@ class KanlyticsBackend(Service):
                 # Create/update meta issue item
                 if rec:
                     # Ensure identifying fields
-                    client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=phase_task_id)
                     mj = _phase_major_for(ts)
-                    if mj is not None:
-                        client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=f"{mj}.0")
-                    client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=phase)
-                    client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text="")
-                    client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text="0")
-                    client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text="0")
-                    client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids["Backlog"])
-                    if meta_start:
-                        client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=meta_start)
-                    if meta_end:
-                        client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=meta_end)
                     project_name_value = (payload.project_name or "").strip()
+                    updates: list[tuple[str, dict[str, Any]]] = []
+                    updates.append((task_id_field_id, {"text": phase_task_id}))
+                    if mj is not None:
+                        updates.append((display_id_field_id, {"text": f"{mj}.0"}))
+                    updates.append((phase_field_id, {"text": phase}))
+                    updates.append((deps_field_id, {"text": ""}))
+                    updates.append((wall_days_field_id, {"text": "0"}))
+                    updates.append((billable_days_field_id, {"text": "0"}))
+                    updates.append((status_field_id, {"singleSelectOptionId": status_option_ids["Backlog"]}))
+                    if meta_start:
+                        updates.append((start_date_field_id, {"date": meta_start}))
+                    if meta_end:
+                        updates.append((end_date_field_id, {"date": meta_end}))
                     if project_name_field_id and project_name_value:
-                        client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
+                        updates.append((project_name_field_id, {"text": project_name_value}))
+                    client.set_fields_bulk(item_id=rec["item_id"], updates=updates)
 
                     if rec["type"] == "Issue":
                         issue_url = rec.get("issue_url")
                         if issue_url:
-                            owner, repo, _ = client.parse_issue_url(issue_url)
-                            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=["kanlytics:phase"])
-                            client.update_issue_rest(issue_url=issue_url, title=title, body=body, labels=labels_safe, assignees=[])
+                            _submit_issue_update(
+                                key=f"phase-meta:{phase_task_id}",
+                                issue_url=issue_url,
+                                title=title,
+                                body=body,
+                                labels=["kanlytics:phase"],
+                                assignees=[],
+                            )
                     else:
                         draft_id = rec.get("draft_issue_id")
                         if draft_id:
@@ -2082,24 +2105,39 @@ class KanlyticsBackend(Service):
                         created_item_id = client.add_draft_issue(title=title, body=body)
 
                     if created_item_id:
-                        client.set_text_field(item_id=created_item_id, field_id=task_id_field_id, text=phase_task_id)
                         mj = _phase_major_for(ts)
+                        updates: list[tuple[str, dict[str, Any]]] = []
+                        updates.append((task_id_field_id, {"text": phase_task_id}))
                         if mj is not None:
-                            client.set_text_field(item_id=created_item_id, field_id=display_id_field_id, text=f"{mj}.0")
-                        client.set_text_field(item_id=created_item_id, field_id=phase_field_id, text=phase)
-                        client.set_text_field(item_id=created_item_id, field_id=deps_field_id, text="")
-                        client.set_text_field(item_id=created_item_id, field_id=wall_days_field_id, text="0")
-                        client.set_text_field(item_id=created_item_id, field_id=billable_days_field_id, text="0")
-                        client.set_single_select_field(item_id=created_item_id, field_id=status_field_id, option_id=status_option_ids["Backlog"])
+                            updates.append((display_id_field_id, {"text": f"{mj}.0"}))
+                        updates.append((phase_field_id, {"text": phase}))
+                        updates.append((deps_field_id, {"text": ""}))
+                        updates.append((wall_days_field_id, {"text": "0"}))
+                        updates.append((billable_days_field_id, {"text": "0"}))
+                        updates.append((status_field_id, {"singleSelectOptionId": status_option_ids["Backlog"]}))
                         if meta_start:
-                            client.set_date_field(item_id=created_item_id, field_id=start_date_field_id, date=meta_start)
+                            updates.append((start_date_field_id, {"date": meta_start}))
                         if meta_end:
-                            client.set_date_field(item_id=created_item_id, field_id=end_date_field_id, date=meta_end)
+                            updates.append((end_date_field_id, {"date": meta_end}))
                         project_name_value = (payload.project_name or "").strip()
                         if project_name_field_id and project_name_value:
-                            client.set_text_field(item_id=created_item_id, field_id=project_name_field_id, text=project_name_value)
+                            updates.append((project_name_field_id, {"text": project_name_value}))
+                        client.set_fields_bulk(item_id=created_item_id, updates=updates)
         except Exception as e:
             out.errors.append(f"phase-meta: {e}")
+
+        # Wait for background issue updates (REST) to finish.
+        if issue_update_futures:
+            for fut in as_completed(list(issue_update_futures.keys())):
+                key = issue_update_futures.get(fut, "unknown")
+                try:
+                    fut.result()
+                    if not str(key).startswith("phase-meta:"):
+                        out.updated_issues += 1
+                except Exception as e:
+                    out.errors.append(f"{key}: {e}")
+
+        pool.shutdown(wait=True)
 
         return out
 
@@ -2173,306 +2211,342 @@ class KanlyticsBackend(Service):
                         by_issue_url[record["issue_url"]] = record
 
                 out = ExportProjectOutput()
-                total = max(1, len(gantt.tasks))
-                for idx, t in enumerate(gantt.tasks):
-                    pct = 15 + int((idx / total) * 80)  # 15..95
-                    self._job_update(job_id, progress=pct, message=f"Exporting tasks… ({idx+1}/{total})")
+                # Parallelize slow REST issue updates (PATCH /issues/...) while keeping ProjectV2 mutations
+                # batched and sequential (GraphQL is already fast once batched).
+                max_workers = int(os.getenv("KANLYTICS_GITHUB_EXPORT_WORKERS", "6") or "6")
+                issue_update_futures: dict[Any, str] = {}
 
-                    task_id = (t.task_id or t.id or "").strip()
-                    if not task_id:
-                        task_id = new_uuid()
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    def _submit_issue_update(*, key: str, issue_url: str, title: str, body: str, labels: list[str], assignees: list[str]) -> None:
+                        def work() -> None:
+                            owner, repo, _ = client.parse_issue_url(issue_url)
+                            labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
+                            client.update_issue_rest(issue_url=issue_url, title=title, body=body, labels=labels_safe, assignees=assignees)
 
-                    title = (t.title or t.name or "").strip()
-                    body = (t.body or t.details or "").strip()
-                    labels = list(t.labels or [])
-                    assignees = list(t.assignees or [])
+                        fut = pool.submit(work)
+                        issue_update_futures[fut] = key
 
-                    rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
+                    total = max(1, len(gantt.tasks))
+                    for idx, t in enumerate(gantt.tasks):
+                        pct = 15 + int((idx / total) * 80)  # 15..95
+                        self._job_update(job_id, progress=pct, message=f"Exporting tasks… ({idx+1}/{total})")
 
-                    try:
-                        desired_status = (getattr(t, "status", None) or "").strip() or "Backlog"
-                        if desired_status not in status_option_ids:
-                            desired_status = "Backlog"
-                        sch = schedule_by_id.get(t.id) or {}
-                        sch_start = sch.get("start")
-                        sch_end = sch.get("end")
-                        project_name_value = (payload.project_name or getattr(t, "project_name", None) or "").strip()
-                        if rec:
-                            client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=task_id)
-                            if project_name_field_id:
-                                if project_name_value:
-                                    client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
-                            if getattr(t, "display_task_id", None):
-                                client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=str(t.display_task_id))
-                            client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=(t.phase or ""))
-                            client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text=",".join(t.dependencies or []))
-                            client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                            client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                            client.set_single_select_field(item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids[desired_status])
-                            if sch_start:
-                                client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=sch_start)
-                            if sch_end:
-                                client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=sch_end)
+                        task_id = (t.task_id or t.id or "").strip()
+                        if not task_id:
+                            task_id = new_uuid()
 
-                            if rec["type"] == "Issue":
-                                issue_url = t.url or rec.get("issue_url")
-                                if issue_url:
-                                    owner, repo, _ = client.parse_issue_url(issue_url)
-                                    labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
-                                    client.update_issue_rest(
-                                        issue_url=issue_url,
+                        title = (t.title or t.name or "").strip()
+                        body = (t.body or t.details or "").strip()
+                        labels = list(t.labels or [])
+                        assignees = list(t.assignees or [])
+
+                        rec = by_task_id.get(task_id) or (by_issue_url.get(t.url) if t.url else None)
+
+                        try:
+                            desired_status = (getattr(t, "status", None) or "").strip() or "Backlog"
+                            if desired_status not in status_option_ids:
+                                desired_status = "Backlog"
+                            sch = schedule_by_id.get(t.id) or {}
+                            sch_start = sch.get("start")
+                            sch_end = sch.get("end")
+                            project_name_value = (payload.project_name or getattr(t, "project_name", None) or "").strip()
+                            if rec:
+                                updates: list[tuple[str, dict[str, Any]]] = []
+                                updates.append((task_id_field_id, {"text": task_id}))
+                                if project_name_field_id and project_name_value:
+                                    updates.append((project_name_field_id, {"text": project_name_value}))
+                                if getattr(t, "display_task_id", None):
+                                    updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                                updates.append((phase_field_id, {"text": (t.phase or "")}))
+                                updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                                updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                                updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                                updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
+                                if sch_start:
+                                    updates.append((start_date_field_id, {"date": sch_start}))
+                                if sch_end:
+                                    updates.append((end_date_field_id, {"date": sch_end}))
+                                client.set_fields_bulk(item_id=rec["item_id"], updates=updates)
+
+                                if rec["type"] == "Issue":
+                                    issue_url = t.url or rec.get("issue_url")
+                                    if issue_url:
+                                        _submit_issue_update(
+                                            key=task_id,
+                                            issue_url=issue_url,
+                                            title=title or "(untitled)",
+                                            body=body,
+                                            labels=labels,
+                                            assignees=assignees,
+                                        )
+                                else:
+                                    draft_id = rec.get("draft_issue_id")
+                                    if draft_id:
+                                        client.update_draft_issue(draft_issue_id=draft_id, title=title or "(untitled)", body=body)
+                                        out.updated_draft_issues += 1
+                            else:
+                                if t.url:
+                                    owner, repo, number = client.parse_issue_url(t.url)
+                                    issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                                    item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                                    updates: list[tuple[str, dict[str, Any]]] = []
+                                    updates.append((task_id_field_id, {"text": task_id}))
+                                    if project_name_field_id and project_name_value:
+                                        updates.append((project_name_field_id, {"text": project_name_value}))
+                                    if getattr(t, "display_task_id", None):
+                                        updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                                    updates.append((phase_field_id, {"text": (t.phase or "")}))
+                                    updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                                    updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                                    updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                                    updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
+                                    if sch_start:
+                                        updates.append((start_date_field_id, {"date": sch_start}))
+                                    if sch_end:
+                                        updates.append((end_date_field_id, {"date": sch_end}))
+                                    client.set_fields_bulk(item_id=item_id, updates=updates)
+                                    out.added_existing_issues += 1
+                                    _submit_issue_update(
+                                        key=task_id,
+                                        issue_url=t.url,
                                         title=title or "(untitled)",
                                         body=body,
-                                        labels=labels_safe,
+                                        labels=labels,
                                         assignees=assignees,
                                     )
-                                    out.updated_issues += 1
-                            else:
-                                draft_id = rec.get("draft_issue_id")
-                                if draft_id:
-                                    client.update_draft_issue(draft_issue_id=draft_id, title=title or "(untitled)", body=body)
-                                    out.updated_draft_issues += 1
-                        else:
-                            if t.url:
-                                owner, repo, number = client.parse_issue_url(t.url)
-                                issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
-                                item_id = client.add_issue_item(issue_node_id=issue_node_id)
-                                client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
-                                if project_name_field_id and project_name_value:
-                                    client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
-                                if getattr(t, "display_task_id", None):
-                                    client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
-                                client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
-                                client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
-                                client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                                client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                                client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
-                                if sch_start:
-                                    client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
-                                if sch_end:
-                                    client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
-                                out.added_existing_issues += 1
-                                labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=labels)
-                                client.update_issue_rest(
-                                    issue_url=t.url,
-                                    title=title or "(untitled)",
-                                    body=body,
-                                    labels=labels_safe,
-                                    assignees=assignees,
+                                else:
+                                    if issue_repo:
+                                        labels_safe = client.ensure_labels_exist(repo=issue_repo, labels=labels)
+                                        created_url = client.create_issue_rest(
+                                            repo=issue_repo,
+                                            title=title or "(untitled)",
+                                            body=body,
+                                            labels=labels_safe,
+                                            assignees=assignees,
+                                        )
+                                        owner, repo, number = client.parse_issue_url(created_url)
+                                        issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
+                                        item_id = client.add_issue_item(issue_node_id=issue_node_id)
+                                        updates: list[tuple[str, dict[str, Any]]] = []
+                                        updates.append((task_id_field_id, {"text": task_id}))
+                                        if project_name_field_id and project_name_value:
+                                            updates.append((project_name_field_id, {"text": project_name_value}))
+                                        if getattr(t, "display_task_id", None):
+                                            updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                                        updates.append((phase_field_id, {"text": (t.phase or "")}))
+                                        updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                                        updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                                        updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                                        updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
+                                        if sch_start:
+                                            updates.append((start_date_field_id, {"date": sch_start}))
+                                        if sch_end:
+                                            updates.append((end_date_field_id, {"date": sch_end}))
+                                        client.set_fields_bulk(item_id=item_id, updates=updates)
+                                        out.added_existing_issues += 1
+                                    else:
+                                        item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
+                                        updates: list[tuple[str, dict[str, Any]]] = []
+                                        updates.append((task_id_field_id, {"text": task_id}))
+                                        if project_name_field_id and project_name_value:
+                                            updates.append((project_name_field_id, {"text": project_name_value}))
+                                        if getattr(t, "display_task_id", None):
+                                            updates.append((display_id_field_id, {"text": str(t.display_task_id)}))
+                                        updates.append((phase_field_id, {"text": (t.phase or "")}))
+                                        updates.append((deps_field_id, {"text": ",".join(t.dependencies or [])}))
+                                        updates.append((wall_days_field_id, {"text": str(t.wall_days or 0)}))
+                                        updates.append((billable_days_field_id, {"text": str(t.billable_days or 0)}))
+                                        updates.append((status_field_id, {"singleSelectOptionId": status_option_ids[desired_status]}))
+                                        if sch_start:
+                                            updates.append((start_date_field_id, {"date": sch_start}))
+                                        if sch_end:
+                                            updates.append((end_date_field_id, {"date": sch_end}))
+                                        client.set_fields_bulk(item_id=item_id, updates=updates)
+                                        out.created_draft_issues += 1
+                        except Exception as e:
+                            out.errors.append(f"{task_id}: {e}")
+
+                    # --- Phase meta issues (one per phase) ---
+                    # Ensure each phase has a corresponding "meta issue" on the project board.
+                    try:
+                        from uuid import NAMESPACE_URL, uuid5
+
+                        # Group tasks by phase
+                        tasks_by_phase: dict[str, list[Any]] = {}
+                        for t in gantt.tasks:
+                            ph = (getattr(t, "phase", None) or "Unphased").strip() or "Unphased"
+                            tasks_by_phase.setdefault(ph, []).append(t)
+
+                        # Choose a default repo for meta issues when not explicitly provided.
+                        default_meta_repo: Optional[str] = issue_repo
+                        if not default_meta_repo:
+                            for t in gantt.tasks:
+                                if getattr(t, "url", None):
+                                    try:
+                                        owner, repo, _ = client.parse_issue_url(t.url)
+                                        default_meta_repo = f"{owner}/{repo}"
+                                        break
+                                    except Exception:
+                                        continue
+
+                        def _phase_major_for(ts: list[Any]) -> Optional[int]:
+                            import re
+
+                            majors: list[int] = []
+                            for x in ts:
+                                s = (getattr(x, "display_task_id", None) or "").strip()
+                                m = re.match(r"^(\d+)\.(\d+)$", s)
+                                if m:
+                                    majors.append(int(m.group(1)))
+                            if not majors:
+                                return None
+                            return max(set(majors), key=lambda v: (majors.count(v), -v))
+
+                        def _format_ref(meta_repo: Optional[str], issue_url: str) -> str:
+                            owner, repo, number = client.parse_issue_url(issue_url)
+                            if meta_repo and meta_repo.lower() == f"{owner}/{repo}".lower():
+                                return f"#{number}"
+                            return f"{owner}/{repo}#{number}"
+
+                        self._job_update(job_id, progress=96, message="Updating phase meta issues…")
+
+                        for phase, ts in tasks_by_phase.items():
+                            # Deterministic Task ID for phase meta issue so we can update it idempotently.
+                            phase_task_id = str(uuid5(NAMESPACE_URL, f"kanlytics:phase:{payload.project_url}:{phase}"))
+                            rec = by_task_id.get(phase_task_id)
+
+                            meta_repo = default_meta_repo
+                            if rec and rec.get("issue_url"):
+                                try:
+                                    owner, repo, _ = client.parse_issue_url(rec["issue_url"])
+                                    meta_repo = f"{owner}/{repo}"
+                                except Exception:
+                                    pass
+                            title = phase
+
+                            # Meta schedule range: earliest sub-task start to latest sub-task end (if available).
+                            meta_start: Optional[str] = None
+                            meta_end: Optional[str] = None
+                            for x in ts:
+                                xid = getattr(x, "id", None)
+                                if not xid:
+                                    continue
+                                sch = schedule_by_id.get(str(xid)) or {}
+                                s = sch.get("start")
+                                e = sch.get("end")
+                                if s:
+                                    meta_start = s if meta_start is None else min(meta_start, s)
+                                if e:
+                                    meta_end = e if meta_end is None else max(meta_end, e)
+
+                            # Build checklist body
+                            lines: list[str] = [PHASE_META_MARKER, f"## {phase}", ""]
+                            ts_sorted = ts[:]
+                            ts_sorted.sort(
+                                key=lambda x: (
+                                    (getattr(x, "display_task_id", None) or "").strip(),
+                                    (getattr(x, "title", None) or getattr(x, "name", "")).strip().lower(),
                                 )
-                                out.updated_issues += 1
+                            )
+                            for x in ts_sorted:
+                                xt = (getattr(x, "title", None) or getattr(x, "name", "") or "").strip() or "(untitled)"
+                                xurl = (getattr(x, "url", None) or "").strip()
+                                if xurl:
+                                    ref = _format_ref(meta_repo, xurl)
+                                    lines.append(f"- [ ] {ref} {xt}")
+                                else:
+                                    disp = (
+                                        (getattr(x, "display_task_id", None) or getattr(x, "task_id", None) or getattr(x, "id", None) or "")
+                                        .strip()
+                                    )
+                                    if disp:
+                                        lines.append(f"- [ ] {disp} {xt}")
+                                    else:
+                                        lines.append(f"- [ ] {xt}")
+                            body = "\n".join(lines).strip() + "\n"
+
+                            if rec:
+                                mj = _phase_major_for(ts)
+                                updates: list[tuple[str, dict[str, Any]]] = []
+                                updates.append((task_id_field_id, {"text": phase_task_id}))
+                                if mj is not None:
+                                    updates.append((display_id_field_id, {"text": f"{mj}.0"}))
+                                updates.append((phase_field_id, {"text": phase}))
+                                updates.append((deps_field_id, {"text": ""}))
+                                updates.append((wall_days_field_id, {"text": "0"}))
+                                updates.append((billable_days_field_id, {"text": "0"}))
+                                updates.append((status_field_id, {"singleSelectOptionId": status_option_ids["Backlog"]}))
+                                if meta_start:
+                                    updates.append((start_date_field_id, {"date": meta_start}))
+                                if meta_end:
+                                    updates.append((end_date_field_id, {"date": meta_end}))
+                                project_name_value = (payload.project_name or "").strip()
+                                if project_name_field_id and project_name_value:
+                                    updates.append((project_name_field_id, {"text": project_name_value}))
+                                client.set_fields_bulk(item_id=rec["item_id"], updates=updates)
+
+                                if rec["type"] == "Issue":
+                                    issue_url = rec.get("issue_url")
+                                    if issue_url:
+                                        _submit_issue_update(
+                                            key=f"phase-meta:{phase_task_id}",
+                                            issue_url=issue_url,
+                                            title=title,
+                                            body=body,
+                                            labels=["kanlytics:phase"],
+                                            assignees=[],
+                                        )
+                                else:
+                                    draft_id = rec.get("draft_issue_id")
+                                    if draft_id:
+                                        client.update_draft_issue(draft_issue_id=draft_id, title=title, body=body)
                             else:
-                                if issue_repo:
-                                    labels_safe = client.ensure_labels_exist(repo=issue_repo, labels=labels)
+                                created_item_id: Optional[str] = None
+                                if meta_repo:
+                                    labels_safe = client.ensure_labels_exist(repo=meta_repo, labels=["kanlytics:phase"])
                                     created_url = client.create_issue_rest(
-                                        repo=issue_repo,
-                                        title=title or "(untitled)",
-                                        body=body,
-                                        labels=labels_safe,
-                                        assignees=assignees,
+                                        repo=meta_repo, title=title, body=body, labels=labels_safe, assignees=[]
                                     )
                                     owner, repo, number = client.parse_issue_url(created_url)
                                     issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
-                                    item_id = client.add_issue_item(issue_node_id=issue_node_id)
-                                    client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
-                                    if project_name_field_id and project_name_value:
-                                        client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
-                                    if getattr(t, "display_task_id", None):
-                                        client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
-                                    client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
-                                    client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
-                                    client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                                    client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                                    client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
-                                    if sch_start:
-                                        client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
-                                    if sch_end:
-                                        client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
-                                    out.added_existing_issues += 1
-                                    out.updated_issues += 1
+                                    created_item_id = client.add_issue_item(issue_node_id=issue_node_id)
                                 else:
-                                    item_id = client.add_draft_issue(title=title or "(untitled)", body=body)
-                                    client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                                    created_item_id = client.add_draft_issue(title=title, body=body)
+
+                                if created_item_id:
+                                    mj = _phase_major_for(ts)
+                                    updates: list[tuple[str, dict[str, Any]]] = []
+                                    updates.append((task_id_field_id, {"text": phase_task_id}))
+                                    if mj is not None:
+                                        updates.append((display_id_field_id, {"text": f"{mj}.0"}))
+                                    updates.append((phase_field_id, {"text": phase}))
+                                    updates.append((deps_field_id, {"text": ""}))
+                                    updates.append((wall_days_field_id, {"text": "0"}))
+                                    updates.append((billable_days_field_id, {"text": "0"}))
+                                    updates.append((status_field_id, {"singleSelectOptionId": status_option_ids["Backlog"]}))
+                                    if meta_start:
+                                        updates.append((start_date_field_id, {"date": meta_start}))
+                                    if meta_end:
+                                        updates.append((end_date_field_id, {"date": meta_end}))
+                                    project_name_value = (payload.project_name or "").strip()
                                     if project_name_field_id and project_name_value:
-                                        client.set_text_field(item_id=item_id, field_id=project_name_field_id, text=project_name_value)
-                                    if getattr(t, "display_task_id", None):
-                                        client.set_text_field(item_id=item_id, field_id=display_id_field_id, text=str(t.display_task_id))
-                                    client.set_text_field(item_id=item_id, field_id=phase_field_id, text=(t.phase or ""))
-                                    client.set_text_field(item_id=item_id, field_id=deps_field_id, text=",".join(t.dependencies or []))
-                                    client.set_text_field(item_id=item_id, field_id=wall_days_field_id, text=str(t.wall_days or 0))
-                                    client.set_text_field(item_id=item_id, field_id=billable_days_field_id, text=str(t.billable_days or 0))
-                                    client.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=status_option_ids[desired_status])
-                                    if sch_start:
-                                        client.set_date_field(item_id=item_id, field_id=start_date_field_id, date=sch_start)
-                                    if sch_end:
-                                        client.set_date_field(item_id=item_id, field_id=end_date_field_id, date=sch_end)
-                                    out.created_draft_issues += 1
+                                        updates.append((project_name_field_id, {"text": project_name_value}))
+                                    client.set_fields_bulk(item_id=created_item_id, updates=updates)
                     except Exception as e:
-                        out.errors.append(f"{task_id}: {e}")
+                        out.errors.append(f"phase-meta: {e}")
 
-                # --- Phase meta issues (one per phase) ---
-                # Ensure each phase has a corresponding "meta issue" on the project board.
-                try:
-                    from uuid import NAMESPACE_URL, uuid5
-
-                    # Group tasks by phase
-                    tasks_by_phase: dict[str, list[Any]] = {}
-                    for t in gantt.tasks:
-                        ph = (getattr(t, "phase", None) or "Unphased").strip() or "Unphased"
-                        tasks_by_phase.setdefault(ph, []).append(t)
-
-                    # Choose a default repo for meta issues when not explicitly provided.
-                    default_meta_repo: Optional[str] = issue_repo
-                    if not default_meta_repo:
-                        for t in gantt.tasks:
-                            if getattr(t, "url", None):
-                                try:
-                                    owner, repo, _ = client.parse_issue_url(t.url)
-                                    default_meta_repo = f"{owner}/{repo}"
-                                    break
-                                except Exception:
-                                    continue
-
-                    def _phase_major_for(ts: list[Any]) -> Optional[int]:
-                        import re
-
-                        majors: list[int] = []
-                        for x in ts:
-                            s = (getattr(x, "display_task_id", None) or "").strip()
-                            m = re.match(r"^(\d+)\.(\d+)$", s)
-                            if m:
-                                majors.append(int(m.group(1)))
-                        if not majors:
-                            return None
-                        return max(set(majors), key=lambda v: (majors.count(v), -v))
-
-                    def _format_ref(meta_repo: Optional[str], issue_url: str) -> str:
-                        owner, repo, number = client.parse_issue_url(issue_url)
-                        if meta_repo and meta_repo.lower() == f"{owner}/{repo}".lower():
-                            return f"#{number}"
-                        return f"{owner}/{repo}#{number}"
-
-                    self._job_update(job_id, progress=96, message="Updating phase meta issues…")
-
-                    for phase, ts in tasks_by_phase.items():
-                        # Deterministic Task ID for phase meta issue so we can update it idempotently.
-                        phase_task_id = str(uuid5(NAMESPACE_URL, f"kanlytics:phase:{payload.project_url}:{phase}"))
-                        rec = by_task_id.get(phase_task_id)
-
-                        meta_repo = default_meta_repo
-                        if rec and rec.get("issue_url"):
+                    # Wait for background issue updates (REST) to finish.
+                    if issue_update_futures:
+                        self._job_update(job_id, progress=97, message=f"Updating GitHub issues… ({len(issue_update_futures)})")
+                        for fut in as_completed(list(issue_update_futures.keys())):
+                            key = issue_update_futures.get(fut, "unknown")
                             try:
-                                owner, repo, _ = client.parse_issue_url(rec["issue_url"])
-                                meta_repo = f"{owner}/{repo}"
-                            except Exception:
-                                pass
-                        title = phase
-
-                        # Meta schedule range: earliest sub-task start to latest sub-task end (if available).
-                        meta_start: Optional[str] = None
-                        meta_end: Optional[str] = None
-                        for x in ts:
-                            xid = getattr(x, "id", None)
-                            if not xid:
-                                continue
-                            sch = schedule_by_id.get(str(xid)) or {}
-                            s = sch.get("start")
-                            e = sch.get("end")
-                            if s:
-                                meta_start = s if meta_start is None else min(meta_start, s)
-                            if e:
-                                meta_end = e if meta_end is None else max(meta_end, e)
-
-                        # Build checklist body
-                        lines: list[str] = [PHASE_META_MARKER, f"## {phase}", ""]
-                        ts_sorted = ts[:]
-                        ts_sorted.sort(
-                            key=lambda x: (
-                                (getattr(x, "display_task_id", None) or "").strip(),
-                                (getattr(x, "title", None) or getattr(x, "name", "")).strip().lower(),
-                            )
-                        )
-                        for x in ts_sorted:
-                            xt = (getattr(x, "title", None) or getattr(x, "name", "") or "").strip() or "(untitled)"
-                            xurl = (getattr(x, "url", None) or "").strip()
-                            if xurl:
-                                ref = _format_ref(meta_repo, xurl)
-                                lines.append(f"- [ ] {ref} {xt}")
-                            else:
-                                disp = (
-                                    (getattr(x, "display_task_id", None) or getattr(x, "task_id", None) or getattr(x, "id", None) or "")
-                                    .strip()
-                                )
-                                if disp:
-                                    lines.append(f"- [ ] {disp} {xt}")
-                                else:
-                                    lines.append(f"- [ ] {xt}")
-                        body = "\n".join(lines).strip() + "\n"
-
-                        if rec:
-                            client.set_text_field(item_id=rec["item_id"], field_id=task_id_field_id, text=phase_task_id)
-                            mj = _phase_major_for(ts)
-                            if mj is not None:
-                                client.set_text_field(item_id=rec["item_id"], field_id=display_id_field_id, text=f"{mj}.0")
-                            client.set_text_field(item_id=rec["item_id"], field_id=phase_field_id, text=phase)
-                            client.set_text_field(item_id=rec["item_id"], field_id=deps_field_id, text="")
-                            client.set_text_field(item_id=rec["item_id"], field_id=wall_days_field_id, text="0")
-                            client.set_text_field(item_id=rec["item_id"], field_id=billable_days_field_id, text="0")
-                            client.set_single_select_field(
-                                item_id=rec["item_id"], field_id=status_field_id, option_id=status_option_ids["Backlog"]
-                            )
-                            if meta_start:
-                                client.set_date_field(item_id=rec["item_id"], field_id=start_date_field_id, date=meta_start)
-                            if meta_end:
-                                client.set_date_field(item_id=rec["item_id"], field_id=end_date_field_id, date=meta_end)
-                            project_name_value = (payload.project_name or "").strip()
-                            if project_name_field_id and project_name_value:
-                                client.set_text_field(item_id=rec["item_id"], field_id=project_name_field_id, text=project_name_value)
-
-                            if rec["type"] == "Issue":
-                                issue_url = rec.get("issue_url")
-                                if issue_url:
-                                    owner, repo, _ = client.parse_issue_url(issue_url)
-                                    labels_safe = client.ensure_labels_exist(repo=f"{owner}/{repo}", labels=["kanlytics:phase"])
-                                    client.update_issue_rest(issue_url=issue_url, title=title, body=body, labels=labels_safe, assignees=[])
-                            else:
-                                draft_id = rec.get("draft_issue_id")
-                                if draft_id:
-                                    client.update_draft_issue(draft_issue_id=draft_id, title=title, body=body)
-                        else:
-                            created_item_id: Optional[str] = None
-                            if meta_repo:
-                                labels_safe = client.ensure_labels_exist(repo=meta_repo, labels=["kanlytics:phase"])
-                                created_url = client.create_issue_rest(
-                                    repo=meta_repo, title=title, body=body, labels=labels_safe, assignees=[]
-                                )
-                                owner, repo, number = client.parse_issue_url(created_url)
-                                issue_node_id = client.resolve_issue_node_id(owner=owner, repo=repo, number=number)
-                                created_item_id = client.add_issue_item(issue_node_id=issue_node_id)
-                            else:
-                                created_item_id = client.add_draft_issue(title=title, body=body)
-
-                            if created_item_id:
-                                client.set_text_field(item_id=created_item_id, field_id=task_id_field_id, text=phase_task_id)
-                                mj = _phase_major_for(ts)
-                                if mj is not None:
-                                    client.set_text_field(item_id=created_item_id, field_id=display_id_field_id, text=f"{mj}.0")
-                                client.set_text_field(item_id=created_item_id, field_id=phase_field_id, text=phase)
-                                client.set_text_field(item_id=created_item_id, field_id=deps_field_id, text="")
-                                client.set_text_field(item_id=created_item_id, field_id=wall_days_field_id, text="0")
-                                client.set_text_field(item_id=created_item_id, field_id=billable_days_field_id, text="0")
-                                client.set_single_select_field(
-                                    item_id=created_item_id, field_id=status_field_id, option_id=status_option_ids["Backlog"]
-                                )
-                                if meta_start:
-                                    client.set_date_field(item_id=created_item_id, field_id=start_date_field_id, date=meta_start)
-                                if meta_end:
-                                    client.set_date_field(item_id=created_item_id, field_id=end_date_field_id, date=meta_end)
-                                project_name_value = (payload.project_name or "").strip()
-                                if project_name_field_id and project_name_value:
-                                    client.set_text_field(item_id=created_item_id, field_id=project_name_field_id, text=project_name_value)
-                except Exception as e:
-                    out.errors.append(f"phase-meta: {e}")
+                                fut.result()
+                                # Count task issue updates, but not phase-meta maintenance issues.
+                                if not str(key).startswith("phase-meta:"):
+                                    out.updated_issues += 1
+                            except Exception as e:
+                                out.errors.append(f"{key}: {e}")
 
                 self._job_update(job_id, progress=98, message="Finalizing…")
                 # tiny delay so UI can show "finalizing" state
