@@ -789,6 +789,65 @@ export default function App() {
     }
   }
 
+  async function deletePhaseAndReschedule(phase: string) {
+    if (!csvText.trim()) {
+      showToast("error", "No project CSV loaded.");
+      return;
+    }
+    if (!layout) {
+      showToast("error", "No layout available.");
+      return;
+    }
+    // Find all task IDs in this phase
+    const taskIdsToDelete = (layout.tasks || [])
+      .filter((t) => (t.phase || "Unphased") === phase)
+      .map((t) => t.id);
+    
+    if (taskIdsToDelete.length === 0) {
+      showToast("success", `No tasks found in phase "${phase}".`);
+      return;
+    }
+    
+    try {
+      setBusy(true);
+      let currentCsv = csvText;
+      let deletedCount = 0;
+      
+      // Delete each task one by one
+      for (const taskId of taskIdsToDelete) {
+        try {
+          const res = await deleteTask({ csvText: currentCsv, taskId });
+          currentCsv = String(res.csv_text || "");
+          deletedCount++;
+        } catch {
+          // Task may have already been deleted as a dependency cascade - continue
+        }
+      }
+      
+      setCsvText(currentCsv);
+      if (activeProjectId) {
+        setProjects((prev) => prev.map((p) => (p.id === activeProjectId ? { ...p, csvText: currentCsv } : p)));
+      }
+      
+      // Also remove the phase from extraPhases if it exists
+      if (activeProjectId) {
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === activeProjectId
+              ? { ...p, phases: (p.phases || []).filter((ph) => ph !== phase) }
+              : p
+          )
+        );
+      }
+      
+      showToast("success", `Deleted ${deletedCount} task(s) from phase "${phase}".`);
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function openProjectById(pid: string) {
     const p = projects.find((x) => x.id === pid);
     if (!p) return;
@@ -2077,6 +2136,9 @@ export default function App() {
                     }}
                     onDeleteTask={(taskId) => {
                       void deleteTaskAndReschedule(taskId);
+                    }}
+                    onDeletePhase={(phase) => {
+                      void deletePhaseAndReschedule(phase);
                     }}
                     onFetchPhaseMeta={async (phase) => {
                       const repo = (issueRepo || "").trim();

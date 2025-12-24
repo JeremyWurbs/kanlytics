@@ -25,6 +25,7 @@ type Props = {
   onDeleteTask?: (taskId: string) => void;
   onFetchPhaseMeta?: (phase: string) => Promise<PhaseMeta>;
   onSavePhaseMeta?: (phase: string, description: string) => Promise<PhaseMeta>;
+  onDeletePhase?: (phase: string) => void;
   suppressInfoPanel?: boolean;
   exportId?: string;
   hideHeader?: boolean;
@@ -301,6 +302,7 @@ export const GanttChart: React.FC<Props> = ({
   onDeleteTask,
   onFetchPhaseMeta,
   onSavePhaseMeta,
+  onDeletePhase,
   suppressInfoPanel = false,
   exportId,
   hideHeader = false,
@@ -1479,27 +1481,52 @@ export const GanttChart: React.FC<Props> = ({
                     </div>
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flex: "0 0 auto" }}>
                       {selectedPhase ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!selectedPhase) return;
-                            if (!phaseMeta) return;
-                            setEditPhaseDescription(phaseMeta.description || "");
-                            setEditPhaseTab("write");
-                            setEditPhaseOpen(true);
-                          }}
-                          disabled={!selectedPhase || !phaseMeta || !onSavePhaseMeta}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 10,
-                            border: "1px solid var(--border-2)",
-                            background: "var(--card)",
-                            color: "var(--text)",
-                            lineHeight: 1,
-                          }}
-                        >
-                          Edit
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!selectedPhase) return;
+                              if (!phaseMeta) return;
+                              setEditPhaseDescription(phaseMeta.description || "");
+                              setEditPhaseTab("write");
+                              setEditPhaseOpen(true);
+                            }}
+                            disabled={!selectedPhase || !phaseMeta || !onSavePhaseMeta}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 10,
+                              border: "1px solid var(--border-2)",
+                              background: "var(--card)",
+                              color: "var(--text)",
+                              lineHeight: 1,
+                            }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!selectedPhase) return;
+                              const ok = window.confirm(`Delete phase "${selectedPhase}" and all its tasks? This cannot be undone.`);
+                              if (!ok) return;
+                              onDeletePhase?.(selectedPhase);
+                              setSelectedPhase("");
+                              setPhaseMeta(null);
+                              setInfoOpen(false);
+                            }}
+                            disabled={!selectedPhase || !onDeletePhase}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 10,
+                              border: "1px solid var(--toast-error-border)",
+                              background: "var(--card)",
+                              color: "var(--toast-error-text)",
+                              lineHeight: 1,
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </>
                       ) : (
                         <>
                           <button
