@@ -127,6 +127,11 @@ export default function App() {
   const [exportProjectId, setExportProjectId] = useState<string>("");
   const [exportTarget, setExportTarget] = useState<string>("");
   const [exportingPng, setExportingPng] = useState<boolean>(false);
+  
+  // Panel export (Milestones / Critical Tasks)
+  const [panelExportOpen, setPanelExportOpen] = useState<"milestones" | "criticalTasks" | "">("");
+  const milestonesRef = useRef<HTMLDivElement>(null);
+  const criticalTasksRef = useRef<HTMLDivElement>(null);
 
   // All Projects multi-view (read-only Gantt charts)
   const [allProjectsPickerOpen, setAllProjectsPickerOpen] = useState<boolean>(false);
@@ -1658,6 +1663,133 @@ export default function App() {
     }
   }
 
+  async function exportPanelAsPng(panelType: "milestones" | "criticalTasks") {
+    const ref = panelType === "milestones" ? milestonesRef : criticalTasksRef;
+    const el = ref.current;
+    if (!el) {
+      showToast("error", "Panel is not available to export.");
+      return;
+    }
+    try {
+      setBusy(true);
+      await new Promise((r) => window.setTimeout(r, 30));
+
+      const clone = el.cloneNode(true) as HTMLElement;
+      const wrapper = document.createElement("div");
+      wrapper.style.position = "fixed";
+      wrapper.style.left = "-100000px";
+      wrapper.style.top = "0";
+      wrapper.style.pointerEvents = "none";
+      wrapper.style.background = "var(--card)";
+      wrapper.appendChild(clone);
+      document.body.appendChild(wrapper);
+
+      const fullW = clone.scrollWidth;
+      const fullH = clone.scrollHeight;
+      wrapper.style.width = `${fullW}px`;
+      wrapper.style.height = `${fullH}px`;
+
+      const canvas = await html2canvas(clone, {
+        backgroundColor: null,
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        width: fullW,
+        height: fullH,
+      });
+      wrapper.remove();
+
+      const dataUrl = canvas.toDataURL("image/png");
+      const baseName = (activeProject?.name || projectName || "project").trim().replace(/[^\w\- ]+/g, "_");
+      const fname = `${baseName}_${panelType === "milestones" ? "milestones" : "critical_tasks"}.png`;
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setPanelExportOpen("");
+      showToast("success", "Exported PNG.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function exportPanelAsCsv(panelType: "milestones" | "criticalTasks") {
+    if (!layout) {
+      showToast("error", "No layout available.");
+      return;
+    }
+
+    let csvContent = "";
+    const baseName = (activeProject?.name || projectName || "project").trim().replace(/[^\w\- ]+/g, "_");
+    let fname = "";
+
+    if (panelType === "milestones") {
+      const milestones = layout.tasks.filter(t => (t.durations?.wall ?? 1) === 0);
+      if (milestones.length === 0) {
+        showToast("error", "No milestones to export.");
+        return;
+      }
+      milestones.sort((a, b) => (a.schedule.start || "").localeCompare(b.schedule.start || ""));
+      
+      csvContent = "ID,Milestone,Phase,Date\n";
+      for (const m of milestones) {
+        const id = (m.display_task_id || "").replace(/"/g, '""');
+        const name = (m.name || m.title || "").replace(/"/g, '""');
+        const phase = (m.phase || "").replace(/"/g, '""');
+        const date = m.schedule.start || "";
+        csvContent += `"${id}","${name}","${phase}","${date}"\n`;
+      }
+      fname = `${baseName}_milestones.csv`;
+    } else {
+      if (!timelineStatus) {
+        showToast("error", "No timeline status available.");
+        return;
+      }
+      const criticalTasks = timelineStatus.tasks.filter(t => 
+        t.timeline_status === "Delayed" || t.timeline_status === "Critically Delayed"
+      );
+      if (criticalTasks.length === 0) {
+        showToast("error", "No critical tasks to export.");
+        return;
+      }
+      criticalTasks.sort((a, b) => {
+        if (a.timeline_status === "Critically Delayed" && b.timeline_status !== "Critically Delayed") return -1;
+        if (a.timeline_status !== "Critically Delayed" && b.timeline_status === "Critically Delayed") return 1;
+        const aDeadline = a.deadline || a.end_date || "";
+        const bDeadline = b.deadline || b.end_date || "";
+        return aDeadline.localeCompare(bDeadline);
+      });
+
+      csvContent = "ID,Task,Phase,Status,Timeline Status,Deadline\n";
+      for (const t of criticalTasks) {
+        const id = (t.display_task_id || "").replace(/"/g, '""');
+        const name = (t.name || "").replace(/"/g, '""');
+        const phase = (t.phase || "").replace(/"/g, '""');
+        const status = (t.status || "").replace(/"/g, '""');
+        const timelineStatus = (t.timeline_status || "").replace(/"/g, '""');
+        const deadline = t.deadline || t.end_date || "";
+        csvContent += `"${id}","${name}","${phase}","${status}","${timelineStatus}","${deadline}"\n`;
+      }
+      fname = `${baseName}_critical_tasks.csv`;
+    }
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setPanelExportOpen("");
+    showToast("success", "Exported CSV.");
+  }
+
   async function saveCurrentProject() {
     const name = projectName.trim();
     if (!name) {
@@ -2033,8 +2165,25 @@ export default function App() {
               if (milestones.length === 0) return null;
               milestones.sort((a, b) => (a.schedule.start || "").localeCompare(b.schedule.start || ""));
               return (
-                <div className="card" style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10 }}>Milestones</div>
+                <div className="card" style={{ marginBottom: 16 }} ref={milestonesRef}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>Milestones</div>
+                    <button
+                      type="button"
+                      onClick={() => setPanelExportOpen("milestones")}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 8,
+                        border: "1px solid var(--border-2)",
+                        background: "var(--card)",
+                        color: "var(--text)",
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Export
+                    </button>
+                  </div>
                   <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
@@ -2098,9 +2247,26 @@ export default function App() {
               };
               
               return (
-                <div className="card" style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 10, color: "var(--gantt-critical)" }}>
-                    Critical Tasks
+                <div className="card" style={{ marginBottom: 16 }} ref={criticalTasksRef}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "var(--gantt-critical)" }}>
+                      Critical Tasks
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPanelExportOpen("criticalTasks")}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 8,
+                        border: "1px solid var(--border-2)",
+                        background: "var(--card)",
+                        color: "var(--text)",
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Export
+                    </button>
                   </div>
                   <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -2647,6 +2813,57 @@ export default function App() {
                 )}
               </div>
 
+            </div>
+          </div>
+        ) : null}
+
+        {/* Panel Export Modal (Milestones / Critical Tasks) */}
+        {panelExportOpen ? (
+          <div
+            className="modalBackdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Export ${panelExportOpen === "milestones" ? "Milestones" : "Critical Tasks"}`}
+            onClick={() => setPanelExportOpen("")}
+          >
+            <div className="modalCard" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+              <div className="modalHeader">
+                <div>Export {panelExportOpen === "milestones" ? "Milestones" : "Critical Tasks"}</div>
+                <button
+                  type="button"
+                  onClick={() => setPanelExportOpen("")}
+                  style={{ background: "transparent", border: "1px solid var(--border-2)", color: "var(--text)" }}
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+              <div style={{ padding: "8px 0" }}>
+                <div className="small" style={{ marginBottom: 12 }}>
+                  Choose export format:
+                </div>
+              </div>
+              <div className="modalActions">
+                <button type="button" onClick={() => setPanelExportOpen("")} style={secondaryButtonStyle}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void exportPanelAsPng(panelExportOpen)}
+                  disabled={busy}
+                  style={secondaryButtonStyle}
+                >
+                  PNG
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportPanelAsCsv(panelExportOpen)}
+                  disabled={busy}
+                  style={secondaryButtonStyle}
+                >
+                  CSV
+                </button>
+              </div>
             </div>
           </div>
         ) : null}
