@@ -804,7 +804,17 @@ export default function App() {
       .map((t) => t.id);
     
     if (taskIdsToDelete.length === 0) {
-      showToast("success", `No tasks found in phase "${phase}".`);
+      // No tasks to delete, but still remove the phase from extraPhases
+      if (activeProjectId) {
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === activeProjectId
+              ? { ...p, phases: (p.phases || []).filter((ph) => ph !== phase) }
+              : p
+          )
+        );
+      }
+      showToast("success", `Phase "${phase}" removed.`);
       return;
     }
     
@@ -824,20 +834,56 @@ export default function App() {
         }
       }
       
-      setCsvText(currentCsv);
-      if (activeProjectId) {
-        setProjects((prev) => prev.map((p) => (p.id === activeProjectId ? { ...p, csvText: currentCsv } : p)));
-      }
-      
       // Also remove the phase from extraPhases if it exists
       if (activeProjectId) {
         setProjects((prev) =>
           prev.map((p) =>
             p.id === activeProjectId
-              ? { ...p, phases: (p.phases || []).filter((ph) => ph !== phase) }
+              ? { ...p, phases: (p.phases || []).filter((ph) => ph !== phase), csvText: currentCsv }
               : p
           )
         );
+      }
+      
+      // Update CSV and explicitly reschedule
+      setCsvText(currentCsv);
+      
+      // Check if there are any tasks left
+      const hasTasksLeft = currentCsv.trim().split("\n").length > 1;
+      
+      if (hasTasksLeft && startDate.trim()) {
+        // Create a new plan and reschedule with the updated CSV
+        const created = await createPlan(currentCsv, projectName.trim() || undefined);
+        setPlanId(created.plan_id);
+        
+        const scheduled = await schedulePlan({
+          planId: created.plan_id,
+          startDate,
+          durationMode,
+          workingDays,
+        });
+        
+        setLayout(scheduled.layout);
+        
+        // Update timeline status
+        try {
+          const tlStatus = await fetchTimelineStatus({ planId: created.plan_id });
+          setTimelineStatus(tlStatus);
+        } catch {
+          setTimelineStatus(null);
+        }
+        
+        lastScheduleKeyRef.current = JSON.stringify({
+          planId: created.plan_id,
+          startDate,
+          durationMode,
+          workingDays,
+        });
+      } else {
+        // No tasks left - clear the layout
+        setLayout(null);
+        setTimelineStatus(null);
+        setPlanId("");
       }
       
       showToast("success", `Deleted ${deletedCount} task(s) from phase "${phase}".`);
