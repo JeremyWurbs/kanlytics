@@ -31,7 +31,7 @@ echo "Starting Kanlytics backend on :${BACKEND_PORT}"
 # NOTE: KanlyticsBackend.launch(...) starts the actual server as a subprocess and (by design)
 # returns after the server is reachable. If this parent Python process exits, the launched
 # server may be terminated as well. Keep this parent process alive.
-python -u -c "from kanlytics.gantt.kanlytics_backend import KanlyticsBackend; KanlyticsBackend.launch(url='http://0.0.0.0:${BACKEND_PORT}/', timeout=15); import time; time.sleep(10**9)" &
+python -u -c "from kanlytics.services.kanlytics_backend import KanlyticsBackend; KanlyticsBackend.launch(url='http://0.0.0.0:${BACKEND_PORT}/', timeout=15); import time; time.sleep(10**9)" &
 BACKEND_PID="$!"
 
 cleanup() {

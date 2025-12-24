@@ -18,7 +18,7 @@ from mindtrace.services import Service
 from mindtrace.core.types.task_schema import TaskSchema
 from mindtrace.registry import Registry
 
-from .gantt import Gantt
+from kanlytics.gantt import Gantt
 from kanlytics.core.github_issue import GitHubIssue
 from kanlytics.core.github_project_v2 import GitHubProjectV2, new_uuid
 
