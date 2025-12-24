@@ -2171,15 +2171,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setPanelExportOpen("milestones")}
-                      style={{
-                        padding: "4px 10px",
-                        borderRadius: 8,
-                        border: "1px solid var(--border-2)",
-                        background: "var(--card)",
-                        color: "var(--text)",
-                        fontSize: 12,
-                        cursor: "pointer",
-                      }}
+                      style={secondaryButtonStyle}
                     >
                       Export
                     </button>
@@ -2255,15 +2247,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setPanelExportOpen("criticalTasks")}
-                      style={{
-                        padding: "4px 10px",
-                        borderRadius: 8,
-                        border: "1px solid var(--border-2)",
-                        background: "var(--card)",
-                        color: "var(--text)",
-                        fontSize: 12,
-                        cursor: "pointer",
-                      }}
+                      style={secondaryButtonStyle}
                     >
                       Export
                     </button>
