@@ -20,6 +20,8 @@ import {
   getPhaseMetaCsv,
   updatePhaseMetaCsv,
   fetchTimelineStatus,
+  updateMetadata,
+  getMetadata,
 } from "./api";
 import type { GanttLayout, TimelineStatusResponse, TaskTimelineStatus } from "./types";
 import { GanttChart } from "./components/GanttChart";
@@ -53,6 +55,18 @@ function newProjectId(): string {
   return `p_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
+function generateProjectHash(): string {
+  try {
+    // Modern browsers
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyCrypto: any = (globalThis as any).crypto;
+    if (anyCrypto?.randomUUID) return anyCrypto.randomUUID();
+  } catch {
+    // ignore
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 type ProjectRecord = {
   id: string;
   name: string;
@@ -64,6 +78,11 @@ type ProjectRecord = {
   fileName?: string;
   projectUrl?: string;
   issueRepo?: string;
+  // Project metadata (stored in CSV headers)
+  projectHash?: string;
+  projectManager?: string;
+  techLead?: string;
+  client?: string;
 };
 
 export default function App() {
@@ -114,10 +133,19 @@ export default function App() {
   const [newProjectWorkingDays, setNewProjectWorkingDays] = useState<boolean>(false);
   const [newProjectDefaultRepo, setNewProjectDefaultRepo] = useState<string>("");
   const [newProjectDefaultRepoError, setNewProjectDefaultRepoError] = useState<string>("");
+  const [newProjectHash, setNewProjectHash] = useState<string>("");
+  const [newProjectManager, setNewProjectManager] = useState<string>("");
+  const [newProjectTechLead, setNewProjectTechLead] = useState<string>("");
+  const [newProjectClient, setNewProjectClient] = useState<string>("");
   const newProjectTemplateFileInputRef = useRef<HTMLInputElement | null>(null);
   const [newProjectTemplatePath, setNewProjectTemplatePath] = useState<string>("");
   const [newProjectTemplateCsvText, setNewProjectTemplateCsvText] = useState<string>("");
   const [newProjectTemplateFileName, setNewProjectTemplateFileName] = useState<string>("");
+  const [editMetadataOpen, setEditMetadataOpen] = useState<boolean>(false);
+  const [editMetadataHash, setEditMetadataHash] = useState<string>("");
+  const [editMetadataManager, setEditMetadataManager] = useState<string>("");
+  const [editMetadataTechLead, setEditMetadataTechLead] = useState<string>("");
+  const [editMetadataClient, setEditMetadataClient] = useState<string>("");
   const [githubAutoConnect, setGithubAutoConnect] = useState<boolean>(false);
   const [githubAutoExport, setGithubAutoExport] = useState<boolean>(false);
   const [githubAutoExportPlanId, setGithubAutoExportPlanId] = useState<string>("");
@@ -351,6 +379,45 @@ export default function App() {
     setPlanId("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Extract metadata from CSV if project record is missing it
+  // This handles cases where CSV has metadata but project record doesn't (e.g., after refresh)
+  useEffect(() => {
+    if (!activeProjectId || !csvText.trim()) return;
+    const p = projects.find((x) => x.id === activeProjectId);
+    if (!p) return;
+    
+    // Extract metadata asynchronously - always try to sync CSV metadata with project record
+    // Use a ref to prevent multiple simultaneous extractions
+    let cancelled = false;
+    void (async () => {
+      try {
+        const metadata = await getMetadata(csvText);
+        if (cancelled) return;
+        if (metadata.metadata) {
+          setProjects((prev) =>
+            prev.map((x) =>
+              x.id === activeProjectId
+                ? {
+                    ...x,
+                    projectHash: metadata.metadata?.project_hash ?? x.projectHash,
+                    projectManager: metadata.metadata?.project_manager ?? x.projectManager,
+                    techLead: metadata.metadata?.tech_lead ?? x.techLead,
+                    client: metadata.metadata?.client ?? x.client,
+                  }
+                : x
+            )
+          );
+        }
+      } catch {
+        // Non-fatal: metadata extraction failed
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProjectId, csvText]);
 
   useEffect(() => {
     try {
@@ -936,7 +1003,49 @@ export default function App() {
       const created = await createPlan(csv, (p.name || "").trim() || undefined);
       const normalized = created.normalized_csv_text && created.normalized_csv_text.trim() ? created.normalized_csv_text : csv;
       setCsvText(normalized);
-      setProjects((prev) => prev.map((x) => (x.id === p.id ? { ...x, csvText: normalized } : x)));
+      
+      // Extract and update metadata from the CSV
+      if (created.metadata) {
+        setProjects((prev) =>
+          prev.map((x) =>
+            x.id === p.id
+              ? {
+                  ...x,
+                  csvText: normalized,
+                  projectHash: created.metadata?.project_hash ?? x.projectHash,
+                  projectManager: created.metadata?.project_manager ?? x.projectManager,
+                  techLead: created.metadata?.tech_lead ?? x.techLead,
+                  client: created.metadata?.client ?? x.client,
+                }
+              : x
+          )
+        );
+      } else {
+        // If no metadata in createPlan response, try to extract from CSV
+        try {
+          const metadata = await getMetadata(normalized);
+          if (metadata.metadata) {
+            setProjects((prev) =>
+              prev.map((x) =>
+                x.id === p.id
+                  ? {
+                      ...x,
+                      csvText: normalized,
+                      projectHash: metadata.metadata?.project_hash ?? x.projectHash,
+                      projectManager: metadata.metadata?.project_manager ?? x.projectManager,
+                      techLead: metadata.metadata?.tech_lead ?? x.techLead,
+                      client: metadata.metadata?.client ?? x.client,
+                    }
+                  : x
+              )
+            );
+          } else {
+            setProjects((prev) => prev.map((x) => (x.id === p.id ? { ...x, csvText: normalized } : x)));
+          }
+        } catch {
+          setProjects((prev) => prev.map((x) => (x.id === p.id ? { ...x, csvText: normalized } : x)));
+        }
+      }
 
       const scheduled = await schedulePlan({
         planId: created.plan_id,
@@ -1102,6 +1211,10 @@ export default function App() {
     setNewProjectWorkingDays(workingDays);
     setNewProjectDefaultRepo(issueRepo);
     setNewProjectDefaultRepoError("");
+    setNewProjectHash(generateProjectHash());
+    setNewProjectManager("");
+    setNewProjectTechLead("");
+    setNewProjectClient("");
     setNewProjectTemplatePath("");
     setNewProjectTemplateCsvText("");
     setNewProjectTemplateFileName("");
@@ -1176,6 +1289,7 @@ export default function App() {
     // Optional template: either chosen from disk (csvText already loaded), or a local path to load.
     const templatePath = newProjectTemplatePath.trim();
     const templateInline = newProjectTemplateCsvText;
+    let finalCsvText = emptyCsv;
     if (templateInline.trim() || templatePath) {
       try {
         setBusy(true);
@@ -1187,17 +1301,136 @@ export default function App() {
           tplName = (res.file_name || "").trim() || tplName;
         }
         if (tplName) setFileName(tplName);
-        if (tplText.trim()) setCsvText(tplText);
+        if (tplText.trim()) {
+          finalCsvText = tplText;
+          setCsvText(tplText);
+        }
         showToast("success", "Project created from template.");
       } catch (e: any) {
         showToast("error", e?.message || String(e));
+        setBusy(false);
+        return;
       } finally {
         setBusy(false);
       }
-      return;
     }
 
-    showToast("success", "Project created.");
+    // Update metadata with project hash, PM, TL, and Client
+    try {
+      setBusy(true);
+      const metadataResult = await updateMetadata({
+        csvText: finalCsvText,
+        projectName: pn,
+        projectHash: newProjectHash.trim() || undefined,
+        projectManager: newProjectManager.trim() || undefined,
+        techLead: newProjectTechLead.trim() || undefined,
+        client: newProjectClient.trim() || undefined,
+      });
+      
+      // Update CSV with metadata
+      setCsvText(metadataResult.csv_text);
+      
+      // Force a re-read of metadata from the updated CSV to ensure consistency
+      const updatedMetadata = await getMetadata(metadataResult.csv_text);
+      
+      // Update project record with metadata from the updated CSV
+      if (updatedMetadata.metadata) {
+        const meta = updatedMetadata.metadata;
+        setProjects((prev) =>
+          prev.map((proj) =>
+            proj.id === id
+              ? {
+                  ...proj,
+                  projectHash: meta.project_hash ?? proj.projectHash,
+                  projectManager: meta.project_manager ?? undefined,
+                  techLead: meta.tech_lead ?? undefined,
+                  client: meta.client ?? undefined,
+                  csvText: metadataResult.csv_text,
+                }
+              : proj
+          )
+        );
+      }
+    } catch (e: any) {
+      // Non-fatal: metadata update failed, but project is still created
+      console.error("Failed to update metadata:", e);
+    } finally {
+      setBusy(false);
+    }
+
+    if (!templateInline.trim() && !templatePath) {
+      showToast("success", "Project created.");
+    }
+  }
+
+  async function openEditMetadataModal() {
+    if (!csvText.trim()) {
+      showToast("error", "No project data available.");
+      return;
+    }
+    try {
+      setBusy(true);
+      const metadata = await getMetadata(csvText);
+      setEditMetadataHash(metadata.metadata?.project_hash || "");
+      setEditMetadataManager(metadata.metadata?.project_manager || "");
+      setEditMetadataTechLead(metadata.metadata?.tech_lead || "");
+      setEditMetadataClient(metadata.metadata?.client || "");
+      setEditMetadataOpen(true);
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveMetadata() {
+    if (!csvText.trim()) {
+      showToast("error", "No project data available.");
+      return;
+    }
+    try {
+      setBusy(true);
+      const result = await updateMetadata({
+        csvText,
+        projectName: projectName.trim() || undefined,
+        projectHash: editMetadataHash.trim() || undefined,
+        projectManager: editMetadataManager.trim() || undefined,
+        techLead: editMetadataTechLead.trim() || undefined,
+        client: editMetadataClient.trim() || undefined,
+      });
+      
+      // Force a re-read of metadata from the updated CSV to ensure consistency
+      const updatedMetadata = await getMetadata(result.csv_text);
+      
+      // Update CSV with new metadata
+      setCsvText(result.csv_text);
+      
+      // Update project record with metadata from the updated CSV
+      if (activeProjectId) {
+        const meta = updatedMetadata.metadata;
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === activeProjectId
+              ? {
+                  ...p,
+                  projectHash: meta?.project_hash ?? p.projectHash,
+                  projectManager: meta?.project_manager ?? undefined,
+                  techLead: meta?.tech_lead ?? undefined,
+                  client: meta?.client ?? undefined,
+                  csvText: result.csv_text,
+                }
+              : p
+          )
+        );
+      }
+      
+      setEditMetadataOpen(false);
+      showToast("success", "Metadata updated.");
+    } catch (e: any) {
+      showToast("error", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function openGithubModal(mode: "connect" | "export") {
@@ -1324,12 +1557,37 @@ export default function App() {
       // Ensure we have a project to associate this import with, and hydrate UI state now.
       const fn = (res.file_name || "").trim();
       const fallbackName = fn ? fn.replace(/\.csv$/i, "") : projectName.trim() || "Imported Project";
-      ensureActiveProject({ name: projectName.trim() || fallbackName, fileName: fn || fileName });
+      const project = ensureActiveProject({ name: projectName.trim() || fallbackName, fileName: fn || fileName });
       setLayout(null);
       setTimelineStatus(null);
       setPlanId("");
       if (fn) setFileName(fn);
-      setCsvText(res.csv_text || "");
+      const csv = res.csv_text || "";
+      setCsvText(csv);
+      
+      // Extract and update metadata from the CSV
+      try {
+        const metadata = await getMetadata(csv);
+        if (metadata.metadata) {
+          setProjects((prev) =>
+            prev.map((x) =>
+              x.id === project.id
+                ? {
+                    ...x,
+                    csvText: csv,
+                    projectHash: metadata.metadata?.project_hash ?? x.projectHash,
+                    projectManager: metadata.metadata?.project_manager ?? x.projectManager,
+                    techLead: metadata.metadata?.tech_lead ?? x.techLead,
+                    client: metadata.metadata?.client ?? x.client,
+                  }
+                : x
+            )
+          );
+        }
+      } catch {
+        // Non-fatal: metadata extraction failed, but CSV is still loaded
+      }
+      
       showToast("success", "Imported CSV.");
     } catch (e: any) {
       showToast("error", e?.message || String(e));
@@ -1675,6 +1933,16 @@ export default function App() {
       await new Promise((r) => window.setTimeout(r, 30));
 
       const clone = el.cloneNode(true) as HTMLElement;
+      
+      // Remove the ID column (first column) from the table
+      const rows = clone.querySelectorAll("tr");
+      for (const row of rows) {
+        const firstCell = row.querySelector("th, td");
+        if (firstCell) {
+          firstCell.remove();
+        }
+      }
+      
       const wrapper = document.createElement("div");
       wrapper.style.position = "fixed";
       wrapper.style.left = "-100000px";
@@ -1913,6 +2181,31 @@ export default function App() {
       // Replace template CSV with normalized/instantiated CSV (UUID Task IDs + remapped deps).
       if (created.normalized_csv_text && created.normalized_csv_text.trim().length > 0) {
         setCsvText(created.normalized_csv_text);
+        // Also update the project record with the normalized CSV
+        if (activeProjectId) {
+          setProjects((prev) =>
+            prev.map((p) =>
+              p.id === activeProjectId ? { ...p, csvText: created.normalized_csv_text } : p
+            )
+          );
+        }
+      }
+
+      // Update project metadata from CSV headers
+      if (created.metadata && activeProjectId) {
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === activeProjectId
+              ? {
+                  ...p,
+                  projectHash: created.metadata?.project_hash ?? p.projectHash,
+                  projectManager: created.metadata?.project_manager ?? p.projectManager,
+                  techLead: created.metadata?.tech_lead ?? p.techLead,
+                  client: created.metadata?.client ?? p.client,
+                }
+              : p
+          )
+        );
       }
 
       const scheduled = await schedulePlan({
@@ -2018,19 +2311,9 @@ export default function App() {
             type="button"
             className={`navItem ${activePage === "viewProjects" ? "isActive" : ""}`}
             onClick={() => setActivePage("viewProjects")}
-            title="All Projects"
+            title="Dashboard"
           >
-            {!navCollapsed ? "All Projects" : "All"}
-          </button>
-          <button
-            type="button"
-            className="navItem"
-            onClick={() => {
-              openNewProjectModal();
-            }}
-            title="New Project"
-          >
-            {!navCollapsed ? "New Project" : "New"}
+            {!navCollapsed ? "Dashboard" : "Dash"}
           </button>
           <button
             type="button"
@@ -2043,16 +2326,6 @@ export default function App() {
           >
             {!navCollapsed ? "Edit Project" : "Edit"}
           </button>
-          <button
-            type="button"
-            className="navItem"
-            onClick={() => {
-              openLoadProjectModal();
-            }}
-            title="Import Project"
-          >
-            {!navCollapsed ? "Import Project" : "Import"}
-          </button>
           <button type="button" className="navItem" onClick={() => setViewOptionsModalOpen(true)} title="View Options">
             {!navCollapsed ? "View Options" : "Options"}
           </button>
@@ -2063,38 +2336,40 @@ export default function App() {
         {activePage === "editProject" ? (
           <div className="container">
       <div className="card" style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-          <div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={() => setKanlyticsOpen(v => !v)}
+            aria-expanded={kanlyticsOpen}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: 0,
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              fontSize: 20,
+              fontWeight: 700,
+              color: "var(--text)",
+            }}
+            title={kanlyticsOpen ? "Collapse panels" : "Expand panels"}
+          >
+            <span className="mono" aria-hidden="true" style={{ fontSize: 18 }}>
+              {kanlyticsOpen ? "▾" : "▸"}
+            </span>
+            <span>{projectName.trim() ? projectName.trim() : "Edit Project"}</span>
+          </button>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <button
               type="button"
-              onClick={() => setKanlyticsOpen(v => !v)}
-              aria-expanded={kanlyticsOpen}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: 0,
-                border: "none",
-                background: "transparent",
-                cursor: "pointer",
-                fontSize: 20,
-                fontWeight: 700,
-                color: "var(--text)",
-              }}
-              title={kanlyticsOpen ? "Collapse panels" : "Expand panels"}
+              onClick={() => void openEditMetadataModal()}
+              disabled={busy || !csvText.trim()}
+              style={secondaryButtonStyle}
+              title="Edit project metadata"
             >
-              <span className="mono" aria-hidden="true" style={{ fontSize: 18 }}>
-                {kanlyticsOpen ? "▾" : "▸"}
-              </span>
-              <span>{projectName.trim() ? projectName.trim() : "Edit Project"}</span>
+              Edit
             </button>
-            <div className="small" style={{ marginTop: 6 }}>
-              <span className="mono">{startDate || "—"}</span>
-              <span style={{ margin: "0 8px" }}>•</span>
-              <span>{workingDays ? "Working days (Mon–Fri)" : "Calendar days"}</span>
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <button type="button" onClick={() => void saveCurrentProject()} disabled={busy || !csvText.trim()} style={secondaryButtonStyle}>
               Save
             </button>
@@ -2104,7 +2379,79 @@ export default function App() {
           </div>
         </div>
 
-        {kanlyticsOpen ? <div style={{ height: 12 }} /> : null}
+        {kanlyticsOpen && (() => {
+          // Collect all unique labels from tasks
+          const allLabels = new Set<string>();
+          if (layout?.tasks) {
+            for (const t of layout.tasks) {
+              if (t.labels) {
+                for (const label of t.labels) {
+                  allLabels.add(label);
+                }
+              }
+            }
+          }
+          const sortedLabels = Array.from(allLabels).sort((a, b) => a.localeCompare(b));
+          
+          const labelStyle: React.CSSProperties = { padding: "4px 16px 4px 0", color: "var(--muted)", whiteSpace: "nowrap", verticalAlign: "top" };
+          const valueStyle: React.CSSProperties = { padding: "4px 0" };
+          
+          return (
+            <table style={{ marginTop: 12, borderCollapse: "collapse", fontSize: 14 }}>
+              <tbody>
+                <tr>
+                  <td style={labelStyle}>Project Hash</td>
+                  <td className="mono" style={{ ...valueStyle, fontSize: 12, color: "var(--muted)" }}>{activeProject?.projectHash || "—"}</td>
+                </tr>
+                <tr>
+                  <td style={labelStyle}>Project Manager</td>
+                  <td style={valueStyle}>{activeProject?.projectManager || "—"}</td>
+                </tr>
+                <tr>
+                  <td style={labelStyle}>Tech Lead</td>
+                  <td style={valueStyle}>{activeProject?.techLead || "—"}</td>
+                </tr>
+                <tr>
+                  <td style={labelStyle}>Client</td>
+                  <td style={valueStyle}>{activeProject?.client || "—"}</td>
+                </tr>
+                <tr>
+                  <td style={labelStyle}>Start Date</td>
+                  <td className="mono" style={valueStyle}>{startDate || "—"}</td>
+                </tr>
+                <tr>
+                  <td style={labelStyle}>Schedule</td>
+                  <td style={valueStyle}>{workingDays ? "Working days (Mon–Fri)" : "Calendar days"}</td>
+                </tr>
+                <tr>
+                  <td style={labelStyle}>Labels</td>
+                  <td style={valueStyle}>
+                    {sortedLabels.length > 0 ? (
+                      <span style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {sortedLabels.map((label) => (
+                          <span
+                            key={label}
+                            style={{
+                              padding: "2px 8px",
+                              borderRadius: 12,
+                              background: "var(--bg)",
+                              border: "1px solid var(--border)",
+                              fontSize: 12,
+                            }}
+                          >
+                            {label}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          );
+        })()}
 
         {/* Panels (collapsible) */}
         {kanlyticsOpen ? null : null}
@@ -2165,7 +2512,7 @@ export default function App() {
               if (milestones.length === 0) return null;
               milestones.sort((a, b) => (a.schedule.start || "").localeCompare(b.schedule.start || ""));
               return (
-                <div className="card" style={{ marginBottom: 16 }} ref={milestonesRef}>
+                <div className="card" style={{ marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                     <div style={{ fontSize: 16, fontWeight: 700 }}>Milestones</div>
                     <button
@@ -2176,7 +2523,7 @@ export default function App() {
                       Export
                     </button>
                   </div>
-                  <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                  <div ref={milestonesRef} style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
                         <tr style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
@@ -2239,7 +2586,7 @@ export default function App() {
               };
               
               return (
-                <div className="card" style={{ marginBottom: 16 }} ref={criticalTasksRef}>
+                <div className="card" style={{ marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                     <div style={{ fontSize: 16, fontWeight: 700, color: "var(--gantt-critical)" }}>
                       Critical Tasks
@@ -2252,7 +2599,7 @@ export default function App() {
                       Export
                     </button>
                   </div>
-                  <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                  <div ref={criticalTasksRef} style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
                         <tr style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
@@ -2367,9 +2714,19 @@ export default function App() {
         ) : (
           <div className="container">
             <div className="card">
-              <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>All Projects</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, gap: 12 }}>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>All Projects</div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button type="button" style={secondaryButtonStyle} onClick={() => openNewProjectModal()}>
+                    New Project
+                  </button>
+                  <button type="button" style={secondaryButtonStyle} onClick={() => openLoadProjectModal()}>
+                    Import Project
+                  </button>
+                </div>
+              </div>
               {projects.length === 0 ? (
-                <div className="small">No projects yet. Use New Project or Import Project to get started.</div>
+                <div className="small">No projects yet. Click "New Project" or "Import Project" to get started.</div>
               ) : (
                 <div style={{ display: "grid", gap: 10 }}>
                   {projects.map((p) => {
@@ -3329,6 +3686,44 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                <div>
+                  <div className="label">Project Hash</div>
+                  <input
+                    value={newProjectHash}
+                    readOnly
+                    className="mono"
+                    style={{ fontSize: 12, color: "var(--muted)", backgroundColor: "var(--bg-2)" }}
+                  />
+                  <div className="small" style={{ marginTop: 6, color: "var(--muted-2)" }}>
+                    Auto-generated unique identifier for this project.
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                  <div>
+                    <div className="label">Project Manager (PM)</div>
+                    <input
+                      value={newProjectManager}
+                      onChange={(e) => setNewProjectManager(e.target.value)}
+                      placeholder="PM name"
+                    />
+                  </div>
+                  <div>
+                    <div className="label">Tech Lead (TL)</div>
+                    <input
+                      value={newProjectTechLead}
+                      onChange={(e) => setNewProjectTechLead(e.target.value)}
+                      placeholder="TL name"
+                    />
+                  </div>
+                  <div>
+                    <div className="label">Client</div>
+                    <input
+                      value={newProjectClient}
+                      onChange={(e) => setNewProjectClient(e.target.value)}
+                      placeholder="Client name"
+                    />
+                  </div>
+                </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <div>
                     <div className="label">Project start date</div>
@@ -3417,6 +3812,68 @@ export default function App() {
                 </button>
                 <button type="button" onClick={() => void createNewProject()} style={secondaryButtonStyle} disabled={busy}>
                   Create
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {editMetadataOpen ? (
+          <div
+            className="modalBackdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Edit project metadata"
+            onClick={() => setEditMetadataOpen(false)}
+          >
+            <div className="modalCard" onClick={(e) => e.stopPropagation()}>
+              <div className="modalHeader">
+                <div>Edit Project Metadata</div>
+                <button
+                  type="button"
+                  onClick={() => setEditMetadataOpen(false)}
+                  style={{ background: "transparent", border: "1px solid var(--border-2)", color: "var(--text)" }}
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gap: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                  <div>
+                    <div className="label">Project Manager (PM)</div>
+                    <input
+                      value={editMetadataManager}
+                      onChange={(e) => setEditMetadataManager(e.target.value)}
+                      placeholder="PM name"
+                    />
+                  </div>
+                  <div>
+                    <div className="label">Tech Lead (TL)</div>
+                    <input
+                      value={editMetadataTechLead}
+                      onChange={(e) => setEditMetadataTechLead(e.target.value)}
+                      placeholder="TL name"
+                    />
+                  </div>
+                  <div>
+                    <div className="label">Client</div>
+                    <input
+                      value={editMetadataClient}
+                      onChange={(e) => setEditMetadataClient(e.target.value)}
+                      placeholder="Client name"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="modalActions">
+                <button type="button" onClick={() => setEditMetadataOpen(false)} style={secondaryButtonStyle}>
+                  Cancel
+                </button>
+                <button type="button" onClick={() => void saveMetadata()} style={secondaryButtonStyle} disabled={busy}>
+                  Save
                 </button>
               </div>
             </div>
