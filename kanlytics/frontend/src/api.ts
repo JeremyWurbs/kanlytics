@@ -16,6 +16,9 @@ import type {
   GetPhaseMetaResponse,
   UpdatePhaseMetaResponse,
   TimelineStatusResponse,
+  GetMetadataResponse,
+  UpdateMetadataResponse,
+  ProjectMetadata,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
@@ -213,5 +216,27 @@ export async function fetchTimelineStatus(params: {
   return postJson<TimelineStatusResponse>("gantt.timeline_status", {
     plan_id: params.planId,
     current_date: params.currentDate,
+  });
+}
+
+export async function getMetadata(csvText: string): Promise<GetMetadataResponse> {
+  return postJson<GetMetadataResponse>("gantt.get_metadata", { csv_text: csvText });
+}
+
+export async function updateMetadata(params: {
+  csvText: string;
+  projectName?: string;
+  projectHash?: string;
+  projectManager?: string;
+  techLead?: string;
+  client?: string;
+}): Promise<UpdateMetadataResponse> {
+  return postJson<UpdateMetadataResponse>("gantt.update_metadata", {
+    csv_text: params.csvText,
+    project_name: params.projectName,
+    project_hash: params.projectHash,
+    project_manager: params.projectManager,
+    tech_lead: params.techLead,
+    client: params.client,
   });
 }

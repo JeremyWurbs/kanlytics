@@ -25,10 +25,144 @@ from kanlytics.core.github_project_v2 import GitHubProjectV2, new_uuid
 STATUS_OPTIONS = ["Backlog", "Planned", "In Progress", "In Review", "Done"]
 PHASE_META_MARKER = "<!-- kanlytics:phase-meta -->"
 
+# CSV Metadata header marker - indicates end of metadata and start of CSV data
+CSV_METADATA_END_MARKER = "# ---"
+
+# Reserved metadata field keys
+METADATA_FIELDS = [
+    "Project Name",
+    "Project Hash",
+    "Project Manager",
+    "Tech Lead",
+    "Client",
+]
+
+
+# ----------------------------
+# CSV Metadata Helpers
+# ----------------------------
+
+def parse_csv_metadata(csv_text: str) -> tuple[dict[str, str], str]:
+    """
+    Parse metadata headers from CSV text.
+    
+    Metadata lines start with '# ' followed by 'Key: Value'.
+    The marker '# ---' indicates end of metadata section.
+    
+    Returns:
+        (metadata_dict, csv_body) - metadata as dict and remaining CSV text
+    """
+    metadata: dict[str, str] = {}
+    lines = csv_text.split("\n")
+    csv_start_idx = 0
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        
+        # End of metadata marker
+        if stripped == CSV_METADATA_END_MARKER.strip():
+            csv_start_idx = i + 1
+            break
+        
+        # Metadata line: "# Key: Value"
+        if stripped.startswith("# ") and ":" in stripped:
+            content = stripped[2:]  # Remove "# " prefix
+            colon_idx = content.index(":")
+            key = content[:colon_idx].strip()
+            value = content[colon_idx + 1:].strip()
+            if key in METADATA_FIELDS:
+                metadata[key] = value
+            continue
+        
+        # Non-metadata line (could be empty or start of CSV)
+        # If we hit a non-comment, non-empty line, that's where CSV starts
+        if stripped and not stripped.startswith("#"):
+            csv_start_idx = i
+            break
+        
+        # Empty line or other comment - keep looking
+        if not stripped:
+            continue
+    
+    csv_body = "\n".join(lines[csv_start_idx:])
+    return metadata, csv_body
+
+
+def write_csv_with_metadata(metadata: dict[str, str], csv_body: str) -> str:
+    """
+    Write CSV text with metadata headers prepended.
+    
+    Args:
+        metadata: Dict of metadata key-value pairs
+        csv_body: The CSV content (without metadata headers)
+    
+    Returns:
+        Complete CSV text with metadata headers
+    """
+    lines: list[str] = []
+    
+    # Write metadata in defined order
+    for key in METADATA_FIELDS:
+        value = metadata.get(key, "")
+        if value:
+            lines.append(f"# {key}: {value}")
+    
+    # Add end marker if we have any metadata
+    if lines:
+        lines.append(CSV_METADATA_END_MARKER)
+    
+    # Add CSV body
+    if csv_body.strip():
+        lines.append(csv_body.strip())
+    
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def ensure_project_hash(metadata: dict[str, str]) -> dict[str, str]:
+    """Ensure metadata has a Project Hash, generating one if missing."""
+    if not metadata.get("Project Hash"):
+        metadata["Project Hash"] = str(uuid4())
+    return metadata
+
 
 # ----------------------------
 # Pydantic Schemas
 # ----------------------------
+
+class ProjectMetadata(BaseModel):
+    """Project-level metadata stored in CSV headers."""
+    project_name: Optional[str] = Field(default=None, alias="Project Name")
+    project_hash: Optional[str] = Field(default=None, alias="Project Hash")
+    project_manager: Optional[str] = Field(default=None, alias="Project Manager")
+    tech_lead: Optional[str] = Field(default=None, alias="Tech Lead")
+    client: Optional[str] = Field(default=None, alias="Client")
+    
+    class Config:
+        populate_by_name = True
+    
+    @classmethod
+    def from_dict(cls, d: dict[str, str]) -> "ProjectMetadata":
+        return cls(
+            project_name=d.get("Project Name"),
+            project_hash=d.get("Project Hash"),
+            project_manager=d.get("Project Manager"),
+            tech_lead=d.get("Tech Lead"),
+            client=d.get("Client"),
+        )
+    
+    def to_dict(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        if self.project_name:
+            result["Project Name"] = self.project_name
+        if self.project_hash:
+            result["Project Hash"] = self.project_hash
+        if self.project_manager:
+            result["Project Manager"] = self.project_manager
+        if self.tech_lead:
+            result["Tech Lead"] = self.tech_lead
+        if self.client:
+            result["Client"] = self.client
+        return result
 
 class CreatePlanInput(BaseModel):
     """
@@ -54,6 +188,10 @@ class CreatePlanOutput(BaseModel):
     normalized_csv_text: str = Field(
         ...,
         description="Normalized V2 CSV text with generated UUID Task IDs and UUID Dependencies (safe to save back to disk).",
+    )
+    metadata: Optional[ProjectMetadata] = Field(
+        default=None,
+        description="Project metadata extracted from CSV headers.",
     )
 
 
@@ -180,6 +318,31 @@ class DeleteTaskInput(BaseModel):
 class DeleteTaskOutput(BaseModel):
     csv_text: str
     removed_task_ids: list[str] = Field(default_factory=list, description="List of removed Task IDs (always includes requested id).")
+
+
+class UpdateMetadataInput(BaseModel):
+    """Update project metadata in CSV text."""
+    csv_text: str = Field(..., description="Current project CSV text (may or may not have metadata headers).")
+    project_name: Optional[str] = Field(default=None, description="Project name.")
+    project_hash: Optional[str] = Field(default=None, description="Project UUID hash (auto-generated if not provided).")
+    project_manager: Optional[str] = Field(default=None, description="Project manager name.")
+    tech_lead: Optional[str] = Field(default=None, description="Tech lead name.")
+    client: Optional[str] = Field(default=None, description="Client name.")
+
+
+class UpdateMetadataOutput(BaseModel):
+    csv_text: str = Field(..., description="Updated CSV text with metadata headers.")
+    metadata: ProjectMetadata = Field(..., description="The updated metadata.")
+
+
+class GetMetadataInput(BaseModel):
+    """Extract project metadata from CSV text."""
+    csv_text: str = Field(..., description="Project CSV text (may or may not have metadata headers).")
+
+
+class GetMetadataOutput(BaseModel):
+    metadata: ProjectMetadata = Field(..., description="Extracted metadata (empty fields if not present).")
+    csv_body: str = Field(..., description="CSV text without metadata headers.")
 
 
 class ConnectProjectInput(BaseModel):
@@ -361,6 +524,18 @@ delete_task_task = TaskSchema(
     output_schema=DeleteTaskOutput,
 )
 
+get_metadata_task = TaskSchema(
+    name="gantt.get_metadata",
+    input_schema=GetMetadataInput,
+    output_schema=GetMetadataOutput,
+)
+
+update_metadata_task = TaskSchema(
+    name="gantt.update_metadata",
+    input_schema=UpdateMetadataInput,
+    output_schema=UpdateMetadataOutput,
+)
+
 class CriticalPathInput(BaseModel):
     plan_id: str
 
@@ -522,6 +697,8 @@ class KanlyticsBackend(Service):
         self.add_endpoint("gantt.append_task", self.append_task, schema=append_task_task)
         self.add_endpoint("gantt.update_task", self.update_task, schema=update_task_task)
         self.add_endpoint("gantt.delete_task", self.delete_task, schema=delete_task_task)
+        self.add_endpoint("gantt.get_metadata", self.get_metadata, schema=get_metadata_task)
+        self.add_endpoint("gantt.update_metadata", self.update_metadata, schema=update_metadata_task)
         self.add_endpoint("csv.load_path", self.load_csv_path, schema=load_csv_path_task)
         self.add_endpoint("csv.save_path", self.save_csv_path, schema=save_csv_path_task)
         self.add_endpoint("projects.save", self.save_project, schema=save_project_task)
@@ -703,7 +880,9 @@ class KanlyticsBackend(Service):
         ]
 
         text = payload.csv_text or ""
-        buf_in = io.StringIO(text)
+        # Extract metadata headers and CSV body
+        original_metadata, csv_body = parse_csv_metadata(text)
+        buf_in = io.StringIO(csv_body)
         reader = _csv.DictReader(buf_in)
         rows: list[dict[str, str]] = []
         # If the CSV has a header, DictReader.fieldnames will be set; otherwise None.
@@ -803,7 +982,10 @@ class KanlyticsBackend(Service):
             # Only write known columns; fill missing with blanks.
             out_r = {k: (r.get(k) or "") for k in fieldnames}
             w.writerow(out_r)
-        return AppendTaskOutput(csv_text=buf_out.getvalue(), task_id=task_id)
+        
+        # Preserve metadata headers in output
+        output_csv = write_csv_with_metadata(original_metadata, buf_out.getvalue())
+        return AppendTaskOutput(csv_text=output_csv, task_id=task_id)
 
     def update_task(self, payload: UpdateTaskInput) -> UpdateTaskOutput:
         import io
@@ -837,7 +1019,9 @@ class KanlyticsBackend(Service):
         if not target_id:
             raise ValueError("task_id is required.")
 
-        buf_in = io.StringIO(payload.csv_text or "")
+        # Extract metadata headers and CSV body
+        original_metadata, csv_body = parse_csv_metadata(payload.csv_text or "")
+        buf_in = io.StringIO(csv_body)
         reader = _csv.DictReader(buf_in)
         rows: list[dict[str, str]] = []
         if reader.fieldnames:
@@ -885,7 +1069,10 @@ class KanlyticsBackend(Service):
         for r in rows:
             out_r = {k: (r.get(k) or "") for k in fieldnames}
             w.writerow(out_r)
-        return UpdateTaskOutput(csv_text=buf_out.getvalue())
+        
+        # Preserve metadata headers in output
+        output_csv = write_csv_with_metadata(original_metadata, buf_out.getvalue())
+        return UpdateTaskOutput(csv_text=output_csv)
 
     def delete_task(self, payload: DeleteTaskInput) -> DeleteTaskOutput:
         """
@@ -922,7 +1109,9 @@ class KanlyticsBackend(Service):
         if not target_id:
             raise ValueError("task_id is required.")
 
-        buf_in = io.StringIO(payload.csv_text or "")
+        # Extract metadata headers and CSV body
+        original_metadata, csv_body = parse_csv_metadata(payload.csv_text or "")
+        buf_in = io.StringIO(csv_body)
         reader = _csv.DictReader(buf_in)
         rows: list[dict[str, str]] = []
         if reader.fieldnames:
@@ -958,19 +1147,75 @@ class KanlyticsBackend(Service):
         for r in kept:
             out_r = {k: (r.get(k) or "") for k in fieldnames}
             w.writerow(out_r)
-        return DeleteTaskOutput(csv_text=buf_out.getvalue(), removed_task_ids=removed)
+        
+        # Preserve metadata headers in output
+        original_metadata, _ = parse_csv_metadata(payload.csv_text)
+        output_csv = write_csv_with_metadata(original_metadata, buf_out.getvalue())
+        return DeleteTaskOutput(csv_text=output_csv, removed_task_ids=removed)
+
+    def get_metadata(self, payload: GetMetadataInput) -> GetMetadataOutput:
+        """
+        Extract project metadata from CSV text.
+        """
+        metadata_dict, csv_body = parse_csv_metadata(payload.csv_text)
+        return GetMetadataOutput(
+            metadata=ProjectMetadata.from_dict(metadata_dict),
+            csv_body=csv_body,
+        )
+
+    def update_metadata(self, payload: UpdateMetadataInput) -> UpdateMetadataOutput:
+        """
+        Update project metadata in CSV text.
+        Preserves existing metadata fields not specified in the update.
+        """
+        # Parse existing metadata
+        existing_metadata, csv_body = parse_csv_metadata(payload.csv_text)
+        
+        # Update with new values (only if provided)
+        if payload.project_name is not None:
+            existing_metadata["Project Name"] = payload.project_name
+        if payload.project_hash is not None:
+            existing_metadata["Project Hash"] = payload.project_hash
+        if payload.project_manager is not None:
+            existing_metadata["Project Manager"] = payload.project_manager
+        if payload.tech_lead is not None:
+            existing_metadata["Tech Lead"] = payload.tech_lead
+        if payload.client is not None:
+            existing_metadata["Client"] = payload.client
+        
+        # Ensure project has a hash
+        existing_metadata = ensure_project_hash(existing_metadata)
+        
+        # Write updated CSV
+        output_csv = write_csv_with_metadata(existing_metadata, csv_body)
+        
+        return UpdateMetadataOutput(
+            csv_text=output_csv,
+            metadata=ProjectMetadata.from_dict(existing_metadata),
+        )
 
     def create_plan(self, payload: CreatePlanInput) -> CreatePlanOutput:
         """
         Parse CSV text into a Gantt plan and store it server-side.
+        Extracts and preserves project metadata from CSV headers.
         """
-        gantt = self._gantt_from_csv_text(payload.csv_text)
+        # Extract metadata from CSV
+        metadata_dict, _ = parse_csv_metadata(payload.csv_text)
+        
+        # Ensure project has a unique hash
+        metadata_dict = ensure_project_hash(metadata_dict)
+        
+        # If project_name provided in payload, use it (overrides CSV header)
         if payload.project_name:
             pn = payload.project_name.strip()
             if pn:
-                for t in gantt.tasks:
-                    if not getattr(t, "project_name", None):
-                        t.project_name = pn
+                metadata_dict["Project Name"] = pn
+        
+        gantt = self._gantt_from_csv_text(payload.csv_text)
+        if metadata_dict.get("Project Name"):
+            for t in gantt.tasks:
+                if not getattr(t, "project_name", None):
+                    t.project_name = metadata_dict["Project Name"]
 
         plan_id = str(uuid4())
         with self._lock:
@@ -978,10 +1223,15 @@ class KanlyticsBackend(Service):
             # clear any old layout under same id (shouldn't happen, but safe)
             self._layouts.pop(plan_id, None)
 
+        # Build normalized CSV with metadata headers
+        normalized_csv_body = gantt.export_csv_v2()
+        normalized_csv_text = write_csv_with_metadata(metadata_dict, normalized_csv_body)
+        
         return CreatePlanOutput(
             plan_id=plan_id,
             task_count=len(gantt.tasks),
-            normalized_csv_text=gantt.export_csv_v2(),
+            normalized_csv_text=normalized_csv_text,
+            metadata=ProjectMetadata.from_dict(metadata_dict),
         )
 
     def schedule(self, payload: ScheduleInput) -> ScheduleOutput:
@@ -2763,11 +3013,16 @@ class KanlyticsBackend(Service):
         so we write to a temporary file and load it.
 
         If you later add `Gantt.from_csv_text(...)`, we can remove this.
+        
+        Note: This method strips metadata headers before parsing.
         """
+        # Strip metadata headers before parsing
+        _, csv_body = parse_csv_metadata(csv_text)
+        
         fd, path = tempfile.mkstemp(suffix=".csv", text=True)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(csv_text)
+                f.write(csv_body)
             return Gantt.from_csv(path)
         finally:
             try:

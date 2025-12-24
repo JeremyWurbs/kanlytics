@@ -52,7 +52,15 @@ export type GanttLayout = {
   edges: Edge[];
 };
 
-export type CreatePlanResponse = { plan_id: string; task_count: number; normalized_csv_text: string };
+export type ProjectMetadata = {
+  project_name?: string | null;
+  project_hash?: string | null;
+  project_manager?: string | null;
+  tech_lead?: string | null;
+  client?: string | null;
+};
+
+export type CreatePlanResponse = { plan_id: string; task_count: number; normalized_csv_text: string; metadata?: ProjectMetadata | null };
 export type ScheduleResponse = { plan_id: string; layout: GanttLayout };
 export type LayoutResponse = { plan_id: string; layout: GanttLayout };
 
@@ -70,6 +78,9 @@ export type AppendTaskResponse = { csv_text: string; task_id: string };
 
 export type UpdateTaskResponse = { csv_text: string };
 export type DeleteTaskResponse = { csv_text: string; removed_task_ids: string[] };
+
+export type GetMetadataResponse = { metadata: ProjectMetadata; csv_body: string };
+export type UpdateMetadataResponse = { csv_text: string; metadata: ProjectMetadata };
 
 export type PhaseMeta = {
   phase: string;

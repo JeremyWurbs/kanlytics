@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -153,16 +154,72 @@ class GitHubProjectV2:
             "User-Agent": "kanlytics/1.0",
         }
 
+        # Reuse HTTP connections (massively reduces export time).
+        self._session = requests.Session()
+        self._tls = threading.local()
+
         self.project_id = self._resolve_project_id()
         self._label_cache_by_repo: Dict[Tuple[str, str], set[str]] = {}
+        self._label_lock = threading.RLock()
+
+    def _rest_session(self) -> requests.Session:
+        """
+        Return a per-thread requests.Session so REST calls can be safely parallelized.
+        """
+        s = getattr(self._tls, "session", None)
+        if s is None:
+            s = requests.Session()
+            setattr(self._tls, "session", s)
+        return s
 
     def _graphql(self, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
-        res = requests.post(GITHUB_GRAPHQL_URL, headers=self._headers, json={"query": query, "variables": variables})
+        # Use a thread-local session to avoid cross-thread session sharing.
+        res = self._rest_session().post(GITHUB_GRAPHQL_URL, headers=self._headers, json={"query": query, "variables": variables})
         res.raise_for_status()
         data = res.json()
         if "errors" in data:
             raise ValueError(f"GitHub GraphQL error: {data['errors']}")
         return data.get("data", {})
+
+    def set_fields_bulk(self, *, item_id: str, updates: List[Tuple[str, Dict[str, Any]]]) -> None:
+        """
+        Set multiple ProjectV2 item fields in a single GraphQL request.
+
+        This is significantly faster than calling set_text_field / set_date_field / set_single_select_field
+        repeatedly (which would require one HTTP request per field).
+
+        Args:
+          item_id: ProjectV2 item id
+          updates: list of (field_id, value_dict) where value_dict matches the GraphQL input, e.g.
+            - {"text": "abc"}
+            - {"date": "2026-01-01"}
+            - {"singleSelectOptionId": "<option_id>"}
+        """
+        if not updates:
+            return
+
+        # Build a mutation with N aliased calls:
+        # mutation($i0: UpdateProjectV2ItemFieldValueInput!, ...) {
+        #   u0: updateProjectV2ItemFieldValue(input: $i0) { projectV2Item { id } }
+        #   ...
+        # }
+        var_defs: List[str] = []
+        body_lines: List[str] = []
+        variables: Dict[str, Any] = {}
+        for idx, (field_id, value) in enumerate(updates):
+            var = f"i{idx}"
+            alias = f"u{idx}"
+            var_defs.append(f"${var}: UpdateProjectV2ItemFieldValueInput!")
+            body_lines.append(f'  {alias}: updateProjectV2ItemFieldValue(input: ${var}) {{ projectV2Item {{ id }} }}')
+            variables[var] = {
+                "projectId": self.project_id,
+                "itemId": item_id,
+                "fieldId": field_id,
+                "value": value,
+            }
+
+        mutation = "mutation(" + ", ".join(var_defs) + ") {\n" + "\n".join(body_lines) + "\n}"
+        self._graphql(mutation, variables)
 
     def _resolve_project_id(self) -> str:
         if self.ref.scope == "orgs":
@@ -669,7 +726,7 @@ class GitHubProjectV2:
             payload["labels"] = labels
         if assignees is not None:
             payload["assignees"] = assignees
-        res = requests.patch(api, headers=self._headers, json=payload)
+        res = self._rest_session().patch(api, headers=self._headers, json=payload)
         res.raise_for_status()
 
     def create_issue_rest(self, *, repo: str, title: str, body: str, labels: List[str], assignees: List[str]) -> str:
@@ -683,7 +740,7 @@ class GitHubProjectV2:
             payload["labels"] = labels
         if assignees is not None:
             payload["assignees"] = assignees
-        res = requests.post(api, headers=self._headers, json=payload)
+        res = self._rest_session().post(api, headers=self._headers, json=payload)
         res.raise_for_status()
         data = res.json()
         url = data.get("html_url")
@@ -696,14 +753,15 @@ class GitHubProjectV2:
         Return existing label names for a repo (cached).
         """
         key = (owner, repo)
-        if key in self._label_cache_by_repo:
-            return set(self._label_cache_by_repo[key])
+        with self._label_lock:
+            if key in self._label_cache_by_repo:
+                return set(self._label_cache_by_repo[key])
 
         labels: set[str] = set()
         page = 1
         while True:
             api = f"https://api.github.com/repos/{owner}/{repo}/labels"
-            res = requests.get(api, headers=self._headers, params={"per_page": 100, "page": page})
+            res = self._rest_session().get(api, headers=self._headers, params={"per_page": 100, "page": page})
             res.raise_for_status()
             data = res.json()
             if not isinstance(data, list) or not data:
@@ -715,7 +773,8 @@ class GitHubProjectV2:
                         labels.add(name.lower())
             page += 1
 
-        self._label_cache_by_repo[key] = set(labels)
+        with self._label_lock:
+            self._label_cache_by_repo[key] = set(labels)
         return set(labels)
 
     @staticmethod
@@ -735,7 +794,7 @@ class GitHubProjectV2:
             "color": self._label_color_hex(name),
             "description": "",
         }
-        res = requests.post(api, headers=self._headers, json=payload)
+        res = self._rest_session().post(api, headers=self._headers, json=payload)
         # If it already exists, GitHub returns 422. Treat as success.
         if res.status_code == 422:
             return
@@ -777,7 +836,8 @@ class GitHubProjectV2:
                 out.append(nm)
                 seen.add(key)
         # refresh cache
-        self._label_cache_by_repo[(owner, name)] = set(existing)
+        with self._label_lock:
+            self._label_cache_by_repo[(owner, name)] = set(existing)
         return out
 
 
