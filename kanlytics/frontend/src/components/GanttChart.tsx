@@ -2290,20 +2290,45 @@ export const GanttChart: React.FC<Props> = ({
                 const w = Math.max(2, Math.max(6, (b.endX - b.startX) * pxPerDay) - padL - padR);
                 const d = barPath(x, y, w, h, true, true);
 
-                // Look up task status for fill calculation (only when unitMode is true and not phaseSummary)
+                // Look up task status for fill calculation (only when unitMode is true)
                 let fillPercent = 0;
                 let fillD = "";
-                if (unitMode && !phaseSummary) {
-                  // Find the representative task to get its status
-                  const repTask = renderTasksNoMilestones.find(t => t.id === b.repId);
-                  if (repTask) {
-                    fillPercent = getStatusFillPercentage(repTask.status);
-                    const fillW = w * fillPercent;
-                    fillD = fillPercent > 0 ? barPath(x, y, fillW, h, true, fillPercent >= 1) : "";
-                    
-                    // DIAGNOSTIC: Log bubble fill calculation
-                    if (b.rowIdx < 3) {
-                      console.log(`[Fill Debug Bubble] Row ${b.rowIdx}: repId=${b.repId}, status="${repTask.status}", fillPercent=${fillPercent}, w=${w.toFixed(2)}, fillW=${fillW.toFixed(2)}, fillD="${fillD.substring(0, 50)}..."`);
+                if (unitMode) {
+                  if (phaseSummary) {
+                    // Phase Summary mode: fill percentage = [Done tasks] / [total tasks in phase]
+                    // Find the phase from the representative task
+                    const repTask = renderTasksNoMilestones.find(t => t.id === b.repId);
+                    if (repTask) {
+                      const phase = repTask.phase || "Unphased";
+                      // Count all tasks in this phase
+                      const phaseTasks = renderTasksNoMilestones.filter(t => (t.phase || "Unphased") === phase);
+                      const totalCount = phaseTasks.length;
+                      const doneCount = phaseTasks.filter(t => {
+                        const status = (t.status || "").trim().toLowerCase();
+                        return status === "done";
+                      }).length;
+                      fillPercent = totalCount > 0 ? doneCount / totalCount : 0;
+                      const fillW = w * fillPercent;
+                      fillD = fillPercent > 0 ? barPath(x, y, fillW, h, true, fillPercent >= 1) : "";
+                      
+                      // DIAGNOSTIC: Log phase summary fill calculation
+                      if (b.rowIdx < 3) {
+                        console.log(`[Fill Debug Bubble Phase Summary] Row ${b.rowIdx}: phase="${phase}", repId=${b.repId}, doneCount=${doneCount}, totalCount=${totalCount}, fillPercent=${fillPercent.toFixed(3)}, w=${w.toFixed(2)}, fillW=${fillW.toFixed(2)}`);
+                      }
+                    }
+                  } else {
+                    // All Tasks mode: fill percentage based on individual task status
+                    // Find the representative task to get its status
+                    const repTask = renderTasksNoMilestones.find(t => t.id === b.repId);
+                    if (repTask) {
+                      fillPercent = getStatusFillPercentage(repTask.status);
+                      const fillW = w * fillPercent;
+                      fillD = fillPercent > 0 ? barPath(x, y, fillW, h, true, fillPercent >= 1) : "";
+                      
+                      // DIAGNOSTIC: Log bubble fill calculation
+                      if (b.rowIdx < 3) {
+                        console.log(`[Fill Debug Bubble] Row ${b.rowIdx}: repId=${b.repId}, status="${repTask.status}", fillPercent=${fillPercent}, w=${w.toFixed(2)}, fillW=${fillW.toFixed(2)}, fillD="${fillD.substring(0, 50)}..."`);
+                      }
                     }
                   }
                 }
@@ -2345,8 +2370,8 @@ export const GanttChart: React.FC<Props> = ({
                     }}
                     style={{ cursor: "pointer" }}
                   >
-                    {/* Fill path (only when unitMode is true and not phaseSummary) */}
-                    {unitMode && !phaseSummary && fillPercent > 0 && fillD ? (
+                    {/* Fill path (only when unitMode is true) */}
+                    {unitMode && fillPercent > 0 && fillD ? (
                       <path d={fillD} fill={strokeColor} fillOpacity={0.5} />
                     ) : null}
                     <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
