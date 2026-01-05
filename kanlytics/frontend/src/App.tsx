@@ -67,6 +67,64 @@ function generateProjectHash(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * Parse a GitHub issue body that may contain ### Description and ### Acceptance Criteria sections.
+ * Returns { description, acceptanceCriteria } with the content extracted.
+ * If sections are not found, returns the entire body as description.
+ */
+function parseIssueBody(body: string): { description: string; acceptanceCriteria: string } {
+  const trimmed = (body || "").trim();
+  if (!trimmed) {
+    return { description: "", acceptanceCriteria: "" };
+  }
+
+  // Look for ### Description and ### Acceptance Criteria sections
+  const descMatch = /^###\s+Description\s*\n(.*?)(?=^###\s+Acceptance\s+Criteria|$)/ims.exec(trimmed);
+  const acceptMatch = /^###\s+Acceptance\s+Criteria\s*\n(.*?)$/ims.exec(trimmed);
+
+  let description = "";
+  let acceptanceCriteria = "";
+
+  if (descMatch) {
+    description = descMatch[1].trim();
+  }
+  if (acceptMatch) {
+    acceptanceCriteria = acceptMatch[1].trim();
+  }
+
+  // If we found neither section, treat the entire body as description
+  if (!descMatch && !acceptMatch) {
+    description = trimmed;
+  }
+
+  return { description, acceptanceCriteria };
+}
+
+/**
+ * Combine description and acceptance criteria into a GitHub issue body format
+ * with ### Description and ### Acceptance Criteria sections.
+ */
+function combineIssueBody(description: string, acceptanceCriteria: string): string {
+  const parts: string[] = [];
+  
+  if (description.trim()) {
+    parts.push("### Description");
+    parts.push("");
+    parts.push(description.trim());
+  }
+  
+  if (acceptanceCriteria.trim()) {
+    if (parts.length > 0) {
+      parts.push("");
+    }
+    parts.push("### Acceptance Criteria");
+    parts.push("");
+    parts.push(acceptanceCriteria.trim());
+  }
+  
+  return parts.join("\n");
+}
+
 type ProjectRecord = {
   id: string;
   name: string;
@@ -716,9 +774,21 @@ export default function App() {
     setCreateTaskTitleError("");
     setCreateTaskRepo(String((t as any).repo || "").trim() || repoFromUrl || issueRepo.trim());
     setCreateTaskRepoError("");
-    setCreateTaskBody(String(t.body || t.details || ""));
+    
+    // For existing GitHub issues (with URL), parse the body to extract description/acceptance criteria
+    // For new tasks (no URL), use the separate fields
+    const hasUrl = Boolean(t.url && String(t.url).trim());
+    if (hasUrl) {
+      // Existing GitHub issue: show entire body in one field
+      const bodyText = String(t.body || t.details || "");
+      setCreateTaskBody(bodyText);
+      setCreateTaskAcceptance(""); // Not used for existing issues
+    } else {
+      // New task: use separate fields
+      setCreateTaskBody(String(t.body || t.details || ""));
+      setCreateTaskAcceptance(String((t as any).acceptance_criteria || ""));
+    }
     setCreateTaskBodyTab("write");
-    setCreateTaskAcceptance(String((t as any).acceptance_criteria || ""));
     setCreateTaskAcceptanceTab("write");
     setCreateTaskWallDays(Number((t.durations?.wall ?? 1) as any) || 1);
     setCreateTaskBillableDays(Number((t.durations?.billable ?? 1) as any) || 1);
@@ -817,15 +887,22 @@ export default function App() {
       showToast("error", "No project CSV loaded.");
       return;
     }
+    
+    // Check if this is an existing GitHub issue
+    const t = (layout?.tasks || []).find((x) => x.id === editingTaskId);
+    const hasUrl = Boolean(t?.url && String(t.url).trim());
+    
     try {
       setBusy(true);
+      // For existing GitHub issues, save the body as-is (user edited the combined body)
+      // For new tasks, save description and acceptance criteria separately
       const res = await updateTask({
         csvText,
         taskId: editingTaskId,
         title,
         repo,
-        body: createTaskBody,
-        acceptanceCriteria: createTaskAcceptance,
+        body: hasUrl ? createTaskBody : createTaskBody, // For existing issues, body is the full combined body
+        acceptanceCriteria: hasUrl ? undefined : createTaskAcceptance, // For existing issues, don't update acceptance criteria separately
         dependencies: createTaskDeps,
         wallDays: Number.isFinite(createTaskWallDays) ? createTaskWallDays : 1,
         billableDays: Number.isFinite(createTaskBillableDays) ? createTaskBillableDays : 1,
@@ -3363,7 +3440,8 @@ export default function App() {
               className="modalCard"
               onClick={(e) => e.stopPropagation()}
               style={{
-                maxWidth: 920,
+                width: "min(1100px, 100%)",
+                maxWidth: 1100,
                 maxHeight: "calc(100vh - 36px)",
                 overflow: "auto",
               }}
@@ -3453,76 +3531,85 @@ export default function App() {
                   </div>
                 </div>
 
-                <div>
-                  <div className="label">Description</div>
-                  <div
-                    style={{
-                      border: "1px solid var(--border-2)",
-                      borderRadius: 10,
-                      overflow: "hidden",
-                      background: "var(--input-bg)",
-                    }}
-                  >
-                    <div style={{ display: "flex", borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
-                      <button
-                        type="button"
-                        onClick={() => setCreateTaskBodyTab("write")}
-                        style={{
-                          padding: "8px 10px",
-                          border: "none",
-                          background: createTaskBodyTab === "write" ? "var(--selected-row-bg)" : "transparent",
-                          color: "var(--text)",
-                          cursor: "pointer",
-                          fontWeight: 700,
-                        }}
-                      >
-                        Write
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCreateTaskBodyTab("preview")}
-                        style={{
-                          padding: "8px 10px",
-                          border: "none",
-                          background: createTaskBodyTab === "preview" ? "var(--selected-row-bg)" : "transparent",
-                          color: "var(--text)",
-                          cursor: "pointer",
-                          fontWeight: 700,
-                        }}
-                      >
-                        Preview
-                      </button>
-                    </div>
-                    {createTaskBodyTab === "write" ? (
-                      <textarea
-                        value={createTaskBody}
-                        onChange={(e) => setCreateTaskBody(e.target.value)}
-                        placeholder="What needs to be done and why it matters. Include any relevant context or links."
-                        style={{
-                          width: "100%",
-                          minHeight: 160,
-                          padding: 10,
-                          border: "none",
-                          outline: "none",
-                          background: "transparent",
-                          color: "var(--text)",
-                          resize: "vertical",
-                        }}
-                      />
-                    ) : (
-                      <div style={{ padding: 10, minHeight: 160, overflow: "auto" }}>
-                        {createTaskBody.trim() ? (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{createTaskBody}</ReactMarkdown>
-                        ) : (
-                          <div className="small">Nothing to preview.</div>
-                        )}
+                {(() => {
+                  // Check if this is an existing GitHub issue (has URL)
+                  const editingTask = editingTaskId ? (layout?.tasks || []).find((x) => x.id === editingTaskId) : null;
+                  const hasUrl = Boolean(editingTask?.url && String(editingTask.url).trim());
+                  const isExistingIssue = createTaskMode === "edit" && hasUrl;
+                  
+                  return (
+                    <>
+                      <div>
+                        <div className="label">{isExistingIssue ? "Details" : "Description"}</div>
+                        <div
+                          style={{
+                            border: "1px solid var(--border-2)",
+                            borderRadius: 10,
+                            overflow: "hidden",
+                            background: "var(--input-bg)",
+                          }}
+                        >
+                          <div style={{ display: "flex", borderBottom: "1px solid var(--border)", background: "var(--card)" }}>
+                            <button
+                              type="button"
+                              onClick={() => setCreateTaskBodyTab("write")}
+                              style={{
+                                padding: "8px 10px",
+                                border: "none",
+                                background: createTaskBodyTab === "write" ? "var(--selected-row-bg)" : "transparent",
+                                color: "var(--text)",
+                                cursor: "pointer",
+                                fontWeight: 700,
+                              }}
+                            >
+                              Write
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCreateTaskBodyTab("preview")}
+                              style={{
+                                padding: "8px 10px",
+                                border: "none",
+                                background: createTaskBodyTab === "preview" ? "var(--selected-row-bg)" : "transparent",
+                                color: "var(--text)",
+                                cursor: "pointer",
+                                fontWeight: 700,
+                              }}
+                            >
+                              Preview
+                            </button>
+                          </div>
+                          {createTaskBodyTab === "write" ? (
+                            <textarea
+                              value={createTaskBody}
+                              onChange={(e) => setCreateTaskBody(e.target.value)}
+                              placeholder={isExistingIssue ? "Edit the issue body directly. Use ### Description and ### Acceptance Criteria sections if needed." : "What needs to be done and why it matters. Include any relevant context or links."}
+                              style={{
+                                width: "100%",
+                                minHeight: 320,
+                                padding: 10,
+                                border: "none",
+                                outline: "none",
+                                background: "transparent",
+                                color: "var(--text)",
+                                resize: "vertical",
+                              }}
+                            />
+                          ) : (
+                            <div style={{ padding: 10, minHeight: 320, overflow: "auto" }}>
+                              {createTaskBody.trim() ? (
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{createTaskBody}</ReactMarkdown>
+                              ) : (
+                                <div className="small">Nothing to preview.</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </div>
 
-                <div>
-                  <div className="label">Acceptance Criteria</div>
+                      {!isExistingIssue ? (
+                        <div>
+                          <div className="label">Acceptance Criteria</div>
                   <div
                     style={{
                       border: "1px solid var(--border-2)",
@@ -3588,6 +3675,10 @@ export default function App() {
                     )}
                   </div>
                 </div>
+                      ) : null}
+                    </>
+                  );
+                })()}
 
                 <div>
                   <div className="label">Dependencies</div>

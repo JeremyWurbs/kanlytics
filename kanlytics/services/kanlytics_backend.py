@@ -125,6 +125,41 @@ def ensure_project_hash(metadata: dict[str, str]) -> dict[str, str]:
     return metadata
 
 
+def combine_issue_body(description: str, acceptance_criteria: str) -> str:
+    """
+    Combine description and acceptance criteria into a GitHub issue body format
+    with ### Description and ### Acceptance Criteria sections.
+    
+    If the body already contains these sections (from an existing GitHub issue),
+    return it as-is. Otherwise, combine the separate fields.
+    """
+    # Check if body already has the sections (existing GitHub issue format)
+    body_text = (description or "").strip()
+    if "### Description" in body_text or "### Acceptance Criteria" in body_text:
+        # Already in GitHub format, return as-is
+        return body_text
+    
+    # Combine separate fields into GitHub format
+    parts: list[str] = []
+    
+    desc = (description or "").strip()
+    accept = (acceptance_criteria or "").strip()
+    
+    if desc:
+        parts.append("### Description")
+        parts.append("")
+        parts.append(desc)
+    
+    if accept:
+        if parts:
+            parts.append("")
+        parts.append("### Acceptance Criteria")
+        parts.append("")
+        parts.append(accept)
+    
+    return "\n".join(parts)
+
+
 # ----------------------------
 # Pydantic Schemas
 # ----------------------------
@@ -2281,7 +2316,19 @@ class KanlyticsBackend(Service):
                 task_id = new_uuid()
 
             title = (t.title or t.name or "").strip()
-            body = (t.body or t.details or "").strip()
+            # For new tasks (no URL), combine description and acceptance criteria
+            # For existing tasks (has URL), use body as-is (may already have combined format)
+            description = (t.body or t.details or "").strip()
+            acceptance_criteria = (getattr(t, "acceptance_criteria", None) or "").strip()
+            has_url = bool(t.url and str(t.url).strip())
+            
+            if has_url:
+                # Existing GitHub issue: use body as-is (user may have edited it directly)
+                body = description
+            else:
+                # New task: combine description and acceptance criteria with markdown headers
+                body = combine_issue_body(description, acceptance_criteria)
+            
             labels = list(t.labels or [])
             assignees = list(t.assignees or [])
             task_repo = (getattr(t, "repo", None) or "").strip() or None
@@ -2691,7 +2738,19 @@ class KanlyticsBackend(Service):
                             task_id = new_uuid()
 
                         title = (t.title or t.name or "").strip()
-                        body = (t.body or t.details or "").strip()
+                        # For new tasks (no URL), combine description and acceptance criteria
+                        # For existing tasks (has URL), use body as-is (may already have combined format)
+                        description = (t.body or t.details or "").strip()
+                        acceptance_criteria = (getattr(t, "acceptance_criteria", None) or "").strip()
+                        has_url = bool(t.url and str(t.url).strip())
+                        
+                        if has_url:
+                            # Existing GitHub issue: use body as-is (user may have edited it directly)
+                            body = description
+                        else:
+                            # New task: combine description and acceptance criteria with markdown headers
+                            body = combine_issue_body(description, acceptance_criteria)
+                        
                         labels = list(t.labels or [])
                         assignees = list(t.assignees or [])
 
