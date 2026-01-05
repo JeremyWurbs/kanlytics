@@ -977,9 +977,29 @@ export const GanttChart: React.FC<Props> = ({
   const dayBands = useMemo(() => {
     // Background banding for LINEAR mode (single global axis).
     const out: { d: number; fill: string }[] = [];
+    
+    // Calculate today's day index (only if showDailyGrid is enabled)
+    let todayDayIndex: number | null = null;
+    if (showDailyGrid) {
+      const MS_DAY = 24 * 60 * 60 * 1000;
+      const now = new Date();
+      // Get today's date in YYYY-MM-DD format (local date)
+      const todayYear = now.getFullYear();
+      const todayMonth = now.getMonth();
+      const todayDate = now.getDate();
+      // Convert to UTC midnight (same as how parseIsoDateUtc works)
+      const todayUtc = Date.UTC(todayYear, todayMonth, todayDate);
+      // Calculate which day index this corresponds to
+      const dayDiff = Math.floor((todayUtc - baseUtc) / MS_DAY);
+      if (dayDiff >= 0 && dayDiff <= dayCount) {
+        todayDayIndex = dayDiff;
+      }
+    }
+    
     if (unitMode) {
       for (let d = 0; d <= dayCount; d += 1) {
-        out.push({ d, fill: d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)" });
+        const fill = (d === todayDayIndex) ? "rgba(239, 68, 68, 0.4)" : (d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+        out.push({ d, fill });
       }
       return out;
     }
@@ -988,7 +1008,9 @@ export const GanttChart: React.FC<Props> = ({
       const t = baseUtc + d * 24 * 60 * 60 * 1000;
       const dow = new Date(t).getUTCDay(); // 0=Sun..6=Sat
       const isWeekend = dow === 0 || dow === 6;
-      if (isWeekend) {
+      if (d === todayDayIndex) {
+        out.push({ d, fill: "rgba(239, 68, 68, 0.4)" });
+      } else if (isWeekend) {
         out.push({ d, fill: "var(--gantt-weekend)" });
       } else {
         const fill = workdayIdx % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)";
@@ -997,7 +1019,7 @@ export const GanttChart: React.FC<Props> = ({
       }
     }
     return out;
-  }, [baseUtc, dayCount, unitMode]);
+  }, [baseUtc, dayCount, unitMode, showDailyGrid]);
 
   function selectTask(id: string) {
     setSelectedPhase("");
@@ -1950,11 +1972,25 @@ export const GanttChart: React.FC<Props> = ({
                 const y0 = sec.startRowIdx * rowHeight;
                 const secH = (sec.endRowIdx - sec.startRowIdx + 1) * rowHeight;
 
+                // Calculate today's day index (only if showDailyGrid is enabled)
+                let todayDayIndex: number | null = null;
+                if (showDailyGrid) {
+                  const MS_DAY = 24 * 60 * 60 * 1000;
+                  const now = new Date();
+                  // Use local date components to get today's date, then convert to UTC midnight
+                  const todayUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+                  const dayDiff = Math.floor((todayUtc - phaseBase) / MS_DAY);
+                  if (dayDiff >= 0 && dayDiff <= dayCount) {
+                    todayDayIndex = dayDiff;
+                  }
+                }
+
                 // Build alternating bands, resetting per phase.
                 const fills: string[] = [];
                 if (unitMode) {
                   for (let d = 0; d <= dayCount; d += 1) {
-                    fills.push(d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+                    const fill = (d === todayDayIndex) ? "rgba(239, 68, 68, 0.4)" : (d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+                    fills.push(fill);
                   }
                 } else {
                   let workdayIdx = 0;
@@ -1962,8 +1998,11 @@ export const GanttChart: React.FC<Props> = ({
                     const t = phaseBase + d * 24 * 60 * 60 * 1000;
                     const dow = new Date(t).getUTCDay();
                     const isWeekend = dow === 0 || dow === 6;
-                    if (isWeekend) fills.push("var(--gantt-weekend)");
-                    else {
+                    if (d === todayDayIndex) {
+                      fills.push("rgba(239, 68, 68, 0.4)");
+                    } else if (isWeekend) {
+                      fills.push("var(--gantt-weekend)");
+                    } else {
                       fills.push(workdayIdx % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
                       workdayIdx += 1;
                     }
@@ -2149,7 +2188,7 @@ export const GanttChart: React.FC<Props> = ({
                     return (
                       <>
                         {fillPercent > 0 && fillD ? (
-                          <path d={fillD} fill={strokeColor} fillOpacity={0.3} />
+                          <path d={fillD} fill={strokeColor} fillOpacity={0.5} />
                         ) : null}
                         <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
                         {!phaseSummary ? (
@@ -2203,7 +2242,7 @@ export const GanttChart: React.FC<Props> = ({
                         return (
                           <React.Fragment key={`${t.id}-seg-${idx}`}>
                             {segmentFillW > 0 && segmentFillD ? (
-                              <path d={segmentFillD} fill={strokeColor} fillOpacity={0.3} />
+                              <path d={segmentFillD} fill={strokeColor} fillOpacity={0.5} />
                             ) : null}
                             <path
                               d={d}
