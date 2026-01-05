@@ -2101,13 +2101,30 @@ export default function App() {
             const csv = String((result as any).csv_text || "");
             const count = Number((result as any).task_count || 0);
             const projectStart = String((result as any).project_start_date || "").trim();
+            const projectTitle = String((result as any).project_title || "").trim();
             closeGithubModal();
             setLayout(null);
             setTimelineStatus(null);
             setPlanId("");
             setFileName("github-project.csv");
             if (projectStart) setStartDate(projectStart);
-            if (csv.trim()) setCsvText(csv);
+            if (csv.trim()) {
+              setCsvText(csv);
+              // Update project name with the GitHub project title if available
+              if (projectTitle) {
+                setProjectName(projectTitle);
+                // Update the active project record with the new name
+                if (activeProjectId) {
+                  setProjects((prev) =>
+                    prev.map((p) =>
+                      p.id === activeProjectId
+                        ? { ...p, name: projectTitle }
+                        : p
+                    )
+                  );
+                }
+              }
+            }
             showToast("success", `Connected. Imported ${count} items.`);
           } else {
             closeGithubModal();

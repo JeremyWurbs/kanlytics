@@ -356,6 +356,10 @@ class ConnectProjectOutput(BaseModel):
         default=None,
         description="Best-effort earliest Start Date across items (YYYY-MM-DD).",
     )
+    project_title: Optional[str] = Field(
+        default=None,
+        description="Title/name of the GitHub ProjectV2.",
+    )
 
 
 class ExportProjectInput(BaseModel):
@@ -1546,10 +1550,15 @@ class KanlyticsBackend(Service):
                 continue
             sd = t.start_date
             earliest = sd if earliest is None else min(earliest, sd)
+        
+        # Get the project title from GitHub
+        project_title = client.get_project_title()
+        
         return ConnectProjectOutput(
             task_count=len(tasks),
             csv_text=gantt.export_csv_v2(),
             project_start_date=None if earliest is None else earliest.isoformat(),
+            project_title=project_title if project_title else None,
         )
 
     def get_phase_meta(self, payload: GetPhaseMetaInput) -> GetPhaseMetaOutput:

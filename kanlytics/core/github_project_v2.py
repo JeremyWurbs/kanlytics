@@ -161,6 +161,7 @@ class GitHubProjectV2:
         self.project_id = self._resolve_project_id()
         self._label_cache_by_repo: Dict[Tuple[str, str], set[str]] = {}
         self._label_lock = threading.RLock()
+        # _project_title is set in _resolve_project_id() when fetching the project
 
     def _rest_session(self) -> requests.Session:
         """
@@ -226,7 +227,7 @@ class GitHubProjectV2:
             query = """
             query($org: String!, $number: Int!) {
               organization(login: $org) {
-                projectV2(number: $number) { id }
+                projectV2(number: $number) { id title }
               }
             }
             """
@@ -236,7 +237,7 @@ class GitHubProjectV2:
             query = """
             query($user: String!, $number: Int!) {
               user(login: $user) {
-                projectV2(number: $number) { id }
+                projectV2(number: $number) { id title }
               }
             }
             """
@@ -245,7 +246,36 @@ class GitHubProjectV2:
 
         if not proj or not proj.get("id"):
             raise ValueError("Could not resolve ProjectV2 id from URL")
+        # Store title for later retrieval
+        self._project_title = proj.get("title") or ""
         return proj["id"]
+    
+    def get_project_title(self) -> str:
+        """Get the title/name of the GitHub ProjectV2."""
+        if not hasattr(self, "_project_title"):
+            # If title wasn't fetched during initialization, fetch it now
+            if self.ref.scope == "orgs":
+                query = """
+                query($org: String!, $number: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $number) { title }
+                  }
+                }
+                """
+                data = self._graphql(query, {"org": self.ref.owner, "number": self.ref.number})
+                proj = (data.get("organization") or {}).get("projectV2")
+            else:
+                query = """
+                query($user: String!, $number: Int!) {
+                  user(login: $user) {
+                    projectV2(number: $number) { title }
+                  }
+                }
+                """
+                data = self._graphql(query, {"user": self.ref.owner, "number": self.ref.number})
+                proj = (data.get("user") or {}).get("projectV2")
+            self._project_title = (proj or {}).get("title") or ""
+        return self._project_title
 
     def list_fields(self) -> List[Dict[str, Any]]:
         query = """
