@@ -353,6 +353,11 @@ export const GanttChart: React.FC<Props> = ({
   const isWeekUnit = timeAxisMode === "weeks" || timeAxisMode === "calendarWeeks";
   const isMonthUnit = timeAxisMode === "months" || timeAxisMode === "calendarMonths";
   const unitMode = isWeekUnit || isMonthUnit;
+  
+  // DIAGNOSTIC: Log timeAxisMode and unitMode
+  if (timeAxisMode === "calendarWeeks" || timeAxisMode === "calendarMonths" || timeAxisMode === "weeks" || timeAxisMode === "months") {
+    console.log(`[GanttChart] timeAxisMode=${timeAxisMode}, isWeekUnit=${isWeekUnit}, isMonthUnit=${isMonthUnit}, unitMode=${unitMode}`);
+  }
   const criticalPathIds = useMemo(() => (layout.meta.critical_path || []) as string[], [layout.meta.critical_path]);
   const criticalSet = useMemo(() => new Set(criticalPathIds), [criticalPathIds]);
   const criticalIdSet = criticalSet;
@@ -2285,6 +2290,24 @@ export const GanttChart: React.FC<Props> = ({
                 const w = Math.max(2, Math.max(6, (b.endX - b.startX) * pxPerDay) - padL - padR);
                 const d = barPath(x, y, w, h, true, true);
 
+                // Look up task status for fill calculation (only when unitMode is true and not phaseSummary)
+                let fillPercent = 0;
+                let fillD = "";
+                if (unitMode && !phaseSummary) {
+                  // Find the representative task to get its status
+                  const repTask = renderTasksNoMilestones.find(t => t.id === b.repId);
+                  if (repTask) {
+                    fillPercent = getStatusFillPercentage(repTask.status);
+                    const fillW = w * fillPercent;
+                    fillD = fillPercent > 0 ? barPath(x, y, fillW, h, true, fillPercent >= 1) : "";
+                    
+                    // DIAGNOSTIC: Log bubble fill calculation
+                    if (b.rowIdx < 3) {
+                      console.log(`[Fill Debug Bubble] Row ${b.rowIdx}: repId=${b.repId}, status="${repTask.status}", fillPercent=${fillPercent}, w=${w.toFixed(2)}, fillW=${fillW.toFixed(2)}, fillD="${fillD.substring(0, 50)}..."`);
+                    }
+                  }
+                }
+
                 // In Phase Summary (stacked), show one date/counter inside each bubble.
                 let bubbleLabel: string | null = null;
                 if (phaseSummary && phaseLayout === "stacked" && b.startUtc != null) {
@@ -2322,6 +2345,10 @@ export const GanttChart: React.FC<Props> = ({
                     }}
                     style={{ cursor: "pointer" }}
                   >
+                    {/* Fill path (only when unitMode is true and not phaseSummary) */}
+                    {unitMode && !phaseSummary && fillPercent > 0 && fillD ? (
+                      <path d={fillD} fill={strokeColor} fillOpacity={0.5} />
+                    ) : null}
                     <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
                     {bubbleLabel ? (
                       <text
@@ -2351,6 +2378,13 @@ export const GanttChart: React.FC<Props> = ({
               showCriticalPath &&
               (criticalIdSet.has(t.id) || t.is_critical || (t.slack_days ?? 0) === 0);
             const strokeColor = isSelected ? "var(--gantt-selected)" : isCritical ? "var(--gantt-critical)" : "var(--text)";
+            
+            // DIAGNOSTIC: Log task rendering info for first few tasks
+            const taskIndex = renderTasks.indexOf(t);
+            if (taskIndex < 3) {
+              console.log(`[Fill Debug Task] Task ${taskIndex}: id=${t.id}, status="${t.status}", phaseSummary=${phaseSummary}, unitMode=${unitMode}, segs.length=${segs.length}, detailMode=${detailMode}, timeAxisMode=${timeAxisMode}`);
+            }
+            
             return (
               <g
                 key={t.id}
@@ -2392,9 +2426,17 @@ export const GanttChart: React.FC<Props> = ({
                     const fillPercent = getStatusFillPercentage(t.status);
                     const fillW = w * fillPercent;
                     const fillD = fillPercent > 0 ? barPath(x, y, fillW, h, true, fillPercent >= 1) : "";
+                    
+                    // DIAGNOSTIC: Log simple path fill calculation
+                    if (unitMode && !phaseSummary) {
+                      console.log(`[Fill Debug Simple] Task ${t.id}: status="${t.status}", fillPercent=${fillPercent}, w=${w.toFixed(2)}, fillW=${fillW.toFixed(2)}, phaseSummary=${phaseSummary}, segs.length=${segs.length}`);
+                    }
+                    
+                    // Always show fill when detailMode is "all" (not phaseSummary), regardless of time axis mode
+                    const shouldShowFill = !phaseSummary && fillPercent > 0 && fillD;
                     return (
                       <>
-                        {fillPercent > 0 && fillD ? (
+                        {shouldShowFill ? (
                           <path d={fillD} fill={strokeColor} fillOpacity={0.5} />
                         ) : null}
                         <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
@@ -2419,8 +2461,16 @@ export const GanttChart: React.FC<Props> = ({
                       const fillPercent = getStatusFillPercentage(t.status);
                       const fillWidth = totalWidth * fillPercent;
                       
+                      // DIAGNOSTIC: Log fill calculation in week/month modes
+                      if (unitMode && !phaseSummary) {
+                        console.log(`[Fill Debug] Task ${t.id} (${t.display_id || t.display_task_id}): status="${t.status}", fillPercent=${fillPercent}, totalWidth=${totalWidth.toFixed(2)}, fillWidth=${fillWidth.toFixed(2)}, phaseSummary=${phaseSummary}`);
+                      }
+                      
                       // Track how much fill we've applied so far
                       let fillRemaining = fillWidth;
+                      
+                      // Only calculate and show fill when detailMode is "all" (not phaseSummary)
+                      const shouldCalculateFill = !phaseSummary;
                       
                       return segs.map((seg, idx) => {
                         const padL = seg.roundLeft ? Math.max(0, barPadPx) : 0;
@@ -2432,7 +2482,7 @@ export const GanttChart: React.FC<Props> = ({
                         // Calculate fill for this segment
                         let segmentFillW = 0;
                         let segmentFillD = "";
-                        if (fillRemaining > 0) {
+                        if (shouldCalculateFill && fillRemaining > 0) {
                           if (fillRemaining >= w) {
                             // Fill entire segment
                             segmentFillW = w;
@@ -2446,9 +2496,16 @@ export const GanttChart: React.FC<Props> = ({
                           }
                         }
                         
+                        // DIAGNOSTIC: Log segment fill calculation
+                        if (unitMode && !phaseSummary && idx === 0) {
+                          console.log(`[Fill Debug] Segment ${idx}: w=${w.toFixed(2)}, segmentFillW=${segmentFillW.toFixed(2)}, segmentFillD="${segmentFillD.substring(0, 50)}...", shouldCalculateFill=${shouldCalculateFill}, fillRemaining=${fillRemaining.toFixed(2)}`);
+                        }
+                        
+                        // Show fill if we calculated it and it's valid
+                        const shouldShowFill = segmentFillW > 0 && segmentFillD;
                         return (
                           <React.Fragment key={`${t.id}-seg-${idx}`}>
-                            {segmentFillW > 0 && segmentFillD ? (
+                            {shouldShowFill ? (
                               <path d={segmentFillD} fill={strokeColor} fillOpacity={0.5} />
                             ) : null}
                             <path

@@ -4097,7 +4097,11 @@ export default function App() {
 
                 <div>
                   <div className="label">Time axis</div>
-                  <select value={timeAxisMode} onChange={(e) => setTimeAxisMode(e.target.value as any)}>
+                  <select value={timeAxisMode} onChange={(e) => {
+                    const newMode = e.target.value as any;
+                    console.log(`[App] Time axis changed: ${timeAxisMode} -> ${newMode}`);
+                    setTimeAxisMode(newMode);
+                  }}>
                     <option value="dayCount">Days</option>
                     <option value="weeks">Weeks</option>
                     <option value="months">Months</option>
