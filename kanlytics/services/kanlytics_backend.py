@@ -1290,8 +1290,8 @@ class KanlyticsBackend(Service):
         Compute the Timeline Status for each task based on schedule vs actual progress.
 
         Timeline Status definitions:
-          - Scheduled: Task not started yet, status is Backlog or Planned
-          - In Development: Task has begun (status is In Progress or In Review)
+          - Scheduled: Task not started yet, status is Backlog or Planned and not delayed
+          - In Development: Task has begun (status is In Progress or In Review) and not past end date
           - Delayed: Start Date passed but still Backlog/Planned, OR End Date passed and not Done
           - Critically Delayed: Delayed AND impacting project completion (on critical path or slack exhausted)
           - Complete: Task status is Done
@@ -1361,10 +1361,31 @@ class KanlyticsBackend(Service):
                 timeline_status = "Complete"
 
             # Rule 2: In Development - task has begun (In Progress or In Review)
+            # BUT also check for delays if past end date
             elif status_lower in ("in progress", "in review"):
-                timeline_status = "In Development"
+                # Check if task is delayed (past end date)
+                is_delayed = False
+                if end_date and current_date > end_date:
+                    is_delayed = True
 
-            # Rules 3, 4, 5: Check for delays
+                if is_delayed:
+                    # Rule 5: Critically Delayed if impacting project completion
+                    # (on critical path OR slack exhausted)
+                    if is_critical:
+                        timeline_status = "Critically Delayed"
+                    elif deadline_str:
+                        deadline_date = parse_date(deadline_str)
+                        if deadline_date and current_date > deadline_date:
+                            # Slack exhausted - this delay impacts the project
+                            timeline_status = "Critically Delayed"
+                        else:
+                            timeline_status = "Delayed"
+                    else:
+                        timeline_status = "Delayed"
+                else:
+                    timeline_status = "In Development"
+
+            # Rules 3, 4, 5: Check for delays for tasks not yet started
             elif status_lower in ("backlog", "planned"):
                 is_delayed = False
 
