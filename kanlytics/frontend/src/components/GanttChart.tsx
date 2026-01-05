@@ -494,10 +494,19 @@ export const GanttChart: React.FC<Props> = ({
   }, [layout.edges]);
 
   // Base project start (UTC midnight). Can be overridden for multi-project shared time-axis views.
-  const baseUtc = useMemo(
-    () => parseIsoDateUtc(axisBaseDate || layout.meta.project_start) ?? Date.now(),
-    [axisBaseDate, layout.meta.project_start],
-  );
+  const baseUtc = useMemo(() => {
+    const parsed = parseIsoDateUtc(axisBaseDate || layout.meta.project_start) ?? Date.now();
+    // DIAGNOSTIC: Log baseUtc source
+    if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks" || timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+      console.log("=== baseUtc SOURCE ===");
+      console.log(`  axisBaseDate prop: ${axisBaseDate || "(not provided)"}`);
+      console.log(`  layout.meta.project_start: ${layout.meta.project_start || "(not provided)"}`);
+      console.log(`  Using: ${axisBaseDate ? "axisBaseDate" : "layout.meta.project_start"}`);
+      console.log(`  Parsed baseUtc: ${parsed} (${new Date(parsed).toISOString()})`);
+      console.log("======================");
+    }
+    return parsed;
+  }, [axisBaseDate, layout.meta.project_start, timeAxisMode]);
 
   const spanById = useMemo(() => {
     const m = new Map<string, { xDay: number; wDay: number }>();
@@ -978,27 +987,128 @@ export const GanttChart: React.FC<Props> = ({
     // Background banding for LINEAR mode (single global axis).
     const out: { d: number; fill: string }[] = [];
     
-    // Calculate today's day index (only if showDailyGrid is enabled)
-    let todayDayIndex: number | null = null;
-    if (showDailyGrid) {
-      const MS_DAY = 24 * 60 * 60 * 1000;
-      const now = new Date();
-      // Get today's date in YYYY-MM-DD format (local date)
-      const todayYear = now.getFullYear();
-      const todayMonth = now.getMonth();
-      const todayDate = now.getDate();
-      // Convert to UTC midnight (same as how parseIsoDateUtc works)
-      const todayUtc = Date.UTC(todayYear, todayMonth, todayDate);
-      // Calculate which day index this corresponds to
-      const dayDiff = Math.floor((todayUtc - baseUtc) / MS_DAY);
-      if (dayDiff >= 0 && dayDiff <= dayCount) {
-        todayDayIndex = dayDiff;
+    const MS_DAY = 24 * 60 * 60 * 1000;
+    const now = new Date();
+    const todayYear = now.getFullYear();
+    const todayMonth = now.getMonth();
+    const todayDate = now.getDate();
+    const todayUtc = Date.UTC(todayYear, todayMonth, todayDate);
+    
+    // Calculate which day index today corresponds to
+    const todayDayIndex = Math.floor((todayUtc - baseUtc) / MS_DAY);
+    
+    // DIAGNOSTIC LOGGING: Test remaining issues
+    if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks" || timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+      console.log("=== TODAY HIGHLIGHT DIAGNOSTICS ===");
+      console.log("Issue #3 (Timezone):");
+      console.log(`  now (local): ${now.toISOString()}`);
+      console.log(`  todayYear: ${todayYear}, todayMonth: ${todayMonth}, todayDate: ${todayDate}`);
+      console.log(`  todayUtc: ${todayUtc} (${new Date(todayUtc).toISOString()})`);
+      console.log(`  Local time vs UTC: ${now.getHours()}h local vs ${new Date(todayUtc).getUTCHours()}h UTC`);
+      
+      console.log("Issue #7 (Shared axis base date):");
+      console.log(`  baseUtc: ${baseUtc} (${new Date(baseUtc).toISOString()})`);
+      console.log(`  dayCount: ${dayCount}`);
+      
+      console.log("Issue #4 (Boundary condition):");
+      console.log(`  todayDayIndex: ${todayDayIndex}`);
+      console.log(`  todayDayIndex < 0: ${todayDayIndex < 0}`);
+      console.log(`  todayDayIndex > dayCount: ${todayDayIndex > dayCount}`);
+      console.log(`  Will be excluded: ${todayDayIndex < 0 || todayDayIndex > dayCount}`);
+      
+      console.log("Issue #12 (Date arithmetic precision):");
+      const calculatedTodayUtc = baseUtc + todayDayIndex * MS_DAY;
+      const diff = Math.abs(calculatedTodayUtc - todayUtc);
+      console.log(`  baseUtc + todayDayIndex * MS_DAY: ${calculatedTodayUtc} (${new Date(calculatedTodayUtc).toISOString()})`);
+      console.log(`  Difference: ${diff}ms (${diff / MS_DAY} days)`);
+      
+      if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+        console.log("Issue #11 (Calendar week calculation):");
+        const todayDateObj = new Date(todayUtc);
+        const todayDow = todayDateObj.getUTCDay();
+        const todayWeekStartUtc = Date.UTC(
+          todayDateObj.getUTCFullYear(),
+          todayDateObj.getUTCMonth(),
+          todayDateObj.getUTCDate() - todayDow
+        );
+        console.log(`  Today is: ${todayDateObj.toISOString().slice(0, 10)} (day of week: ${todayDow})`);
+        console.log(`  Week start (Sunday): ${new Date(todayWeekStartUtc).toISOString().slice(0, 10)}`);
+        console.log(`  todayWeekStartUtc: ${todayWeekStartUtc}`);
       }
+      console.log("===================================");
     }
+    
+    // Determine which days should be highlighted based on time axis mode
+    const isTodayDay = (d: number): boolean => {
+      // In week/month modes, dayCount represents weeks/months, not days
+      // Convert todayDayIndex to the appropriate unit for boundary checking
+      let todayIndexInUnits = todayDayIndex;
+      if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+        todayIndexInUnits = Math.floor(todayDayIndex / 7);
+      } else if (timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+        // Approximate: convert days to months (rough estimate for boundary check)
+        todayIndexInUnits = Math.floor(todayDayIndex / 30);
+      }
+      if (todayIndexInUnits < 0 || todayIndexInUnits > dayCount) return false;
+      
+      if (timeAxisMode === "calendarDays" || timeAxisMode === "dayCount" || (showDailyGrid && timeAxisMode !== "calendarWeeks" && timeAxisMode !== "calendarMonths" && timeAxisMode !== "weeks" && timeAxisMode !== "months")) {
+        // For day-based views, highlight only the exact day
+        return d === todayDayIndex;
+      } else if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+        // For week-based views, highlight all days in the calendar week containing today
+        // Use todayUtc directly instead of recalculating from todayDayIndex to avoid rounding errors
+        const todayDateObj = new Date(todayUtc);
+        const todayDow = todayDateObj.getUTCDay(); // 0=Sunday, 6=Saturday
+        const todayWeekStartUtc = Date.UTC(
+          todayDateObj.getUTCFullYear(),
+          todayDateObj.getUTCMonth(),
+          todayDateObj.getUTCDate() - todayDow
+        );
+        
+        // In week mode, d is a week index, not a day index
+        // Convert to actual days: each week index represents 7 days
+        // Use the start of the week (Sunday) for the week index d
+        const weekStartDate = new Date(baseUtc + d * 7 * MS_DAY);
+        // Find the Sunday of that week
+        const weekStartDow = weekStartDate.getUTCDay();
+        const weekStartUtc = Date.UTC(
+          weekStartDate.getUTCFullYear(),
+          weekStartDate.getUTCMonth(),
+          weekStartDate.getUTCDate() - weekStartDow
+        );
+        
+        // DIAGNOSTIC: Log first few matches and mismatches to see what's happening
+        if (d === todayDayIndex || (d >= todayDayIndex - 1 && d <= todayDayIndex + 1)) {
+          const matches = todayWeekStartUtc === weekStartUtc;
+          if (d === todayDayIndex || matches) {
+            console.log(`  Week ${d}: weekStart=${new Date(weekStartUtc).toISOString().slice(0, 10)}, matches=${matches}`);
+          }
+        }
+        
+        // Check if this week contains today
+        return todayWeekStartUtc === weekStartUtc;
+      } else if (timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+        // For month-based views, highlight all days in the month containing today
+        // Use todayUtc directly instead of recalculating from todayDayIndex to avoid rounding errors
+        const todayDateObj = new Date(todayUtc);
+        const todayY = todayDateObj.getUTCFullYear();
+        const todayM = todayDateObj.getUTCMonth();
+        
+        // In month mode, d is a month index, not a day index
+        // Convert to actual date: add d months to baseUtc
+        const monthDate = new Date(baseUtc);
+        monthDate.setUTCMonth(monthDate.getUTCMonth() + d);
+        const dY = monthDate.getUTCFullYear();
+        const dM = monthDate.getUTCMonth();
+        
+        return dY === todayY && dM === todayM;
+      }
+      return false;
+    };
     
     if (unitMode) {
       for (let d = 0; d <= dayCount; d += 1) {
-        const fill = (d === todayDayIndex) ? "rgba(239, 68, 68, 0.4)" : (d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+        const fill = isTodayDay(d) ? "rgba(239, 68, 68, 0.4)" : (d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
         out.push({ d, fill });
       }
       return out;
@@ -1008,7 +1118,7 @@ export const GanttChart: React.FC<Props> = ({
       const t = baseUtc + d * 24 * 60 * 60 * 1000;
       const dow = new Date(t).getUTCDay(); // 0=Sun..6=Sat
       const isWeekend = dow === 0 || dow === 6;
-      if (d === todayDayIndex) {
+      if (isTodayDay(d)) {
         out.push({ d, fill: "rgba(239, 68, 68, 0.4)" });
       } else if (isWeekend) {
         out.push({ d, fill: "var(--gantt-weekend)" });
@@ -1019,7 +1129,7 @@ export const GanttChart: React.FC<Props> = ({
       }
     }
     return out;
-  }, [baseUtc, dayCount, unitMode, showDailyGrid]);
+  }, [baseUtc, dayCount, unitMode, showDailyGrid, timeAxisMode]);
 
   function selectTask(id: string) {
     setSelectedPhase("");
@@ -1972,33 +2082,130 @@ export const GanttChart: React.FC<Props> = ({
                 const y0 = sec.startRowIdx * rowHeight;
                 const secH = (sec.endRowIdx - sec.startRowIdx + 1) * rowHeight;
 
-                // Calculate today's day index (only if showDailyGrid is enabled)
-                let todayDayIndex: number | null = null;
-                if (showDailyGrid) {
-                  const MS_DAY = 24 * 60 * 60 * 1000;
-                  const now = new Date();
-                  // Use local date components to get today's date, then convert to UTC midnight
-                  const todayUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
-                  const dayDiff = Math.floor((todayUtc - phaseBase) / MS_DAY);
-                  if (dayDiff >= 0 && dayDiff <= dayCount) {
-                    todayDayIndex = dayDiff;
+                // Calculate today's day index relative to this phase
+                const MS_DAY = 24 * 60 * 60 * 1000;
+                const now = new Date();
+                const todayYear = now.getFullYear();
+                const todayMonth = now.getMonth();
+                const todayDate = now.getDate();
+                const todayUtc = Date.UTC(todayYear, todayMonth, todayDate);
+                const todayDayIndex = Math.floor((todayUtc - phaseBase) / MS_DAY);
+                
+                // DIAGNOSTIC: Log stacked mode calculations
+                if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks" || timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+                  console.log(`=== STACKED MODE - Phase: ${sec.phase} ===`);
+                  console.log(`  phaseBase: ${phaseBase} (${new Date(phaseBase).toISOString()})`);
+                  console.log(`  global baseUtc: ${baseUtc} (${new Date(baseUtc).toISOString()})`);
+                  console.log(`  todayUtc: ${todayUtc} (${new Date(todayUtc).toISOString()})`);
+                  console.log(`  todayDayIndex (relative to phaseBase): ${todayDayIndex}`);
+                  console.log(`  dayCount (global): ${dayCount}`);
+                  console.log(`  Boundary check: todayDayIndex < 0 = ${todayDayIndex < 0}, todayDayIndex > dayCount = ${todayDayIndex > dayCount}`);
+                  if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+                    const todayDateObj = new Date(todayUtc);
+                    const todayDow = todayDateObj.getUTCDay();
+                    const todayWeekStartUtc = Date.UTC(
+                      todayDateObj.getUTCFullYear(),
+                      todayDateObj.getUTCMonth(),
+                      todayDateObj.getUTCDate() - todayDow
+                    );
+                    console.log(`  Week start: ${new Date(todayWeekStartUtc).toISOString().slice(0, 10)}`);
                   }
                 }
+                
+                // Determine which days should be highlighted based on time axis mode
+                const isTodayDay = (d: number): boolean => {
+                  // In week/month modes, dayCount represents weeks/months, not days
+                  // Convert todayDayIndex to the appropriate unit for boundary checking
+                  let todayIndexInUnits = todayDayIndex;
+                  if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+                    todayIndexInUnits = Math.floor(todayDayIndex / 7);
+                  } else if (timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+                    // Approximate: convert days to months (rough estimate for boundary check)
+                    todayIndexInUnits = Math.floor(todayDayIndex / 30);
+                  }
+                  if (todayIndexInUnits < 0 || todayIndexInUnits > dayCount) return false;
+                  
+                  if (timeAxisMode === "calendarDays" || timeAxisMode === "dayCount" || (showDailyGrid && timeAxisMode !== "calendarWeeks" && timeAxisMode !== "calendarMonths" && timeAxisMode !== "weeks" && timeAxisMode !== "months")) {
+                    // For day-based views, highlight only the exact day
+                    return d === todayDayIndex;
+                  } else if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+                    // For week-based views, highlight all days in the calendar week containing today
+                    // Use todayUtc directly instead of recalculating from todayDayIndex to avoid rounding errors
+                    const todayDateObj = new Date(todayUtc);
+                    const todayDow = todayDateObj.getUTCDay(); // 0=Sunday, 6=Saturday
+                    const todayWeekStartUtc = Date.UTC(
+                      todayDateObj.getUTCFullYear(),
+                      todayDateObj.getUTCMonth(),
+                      todayDateObj.getUTCDate() - todayDow
+                    );
+                    
+                    // In week mode, d is a week index, not a day index
+                    // Convert to actual days: each week index represents 7 days
+                    // Use the start of the week (Sunday) for the week index d
+                    const weekStartDate = new Date(phaseBase + d * 7 * MS_DAY);
+                    // Find the Sunday of that week
+                    const weekStartDow = weekStartDate.getUTCDay();
+                    const weekStartUtc = Date.UTC(
+                      weekStartDate.getUTCFullYear(),
+                      weekStartDate.getUTCMonth(),
+                      weekStartDate.getUTCDate() - weekStartDow
+                    );
+                    
+                    // DIAGNOSTIC: Log matches in stacked mode
+                    if (d === todayDayIndex || (d >= todayDayIndex - 1 && d <= todayDayIndex + 1)) {
+                      const matches = todayWeekStartUtc === weekStartUtc;
+                      if (d === todayDayIndex || matches) {
+                        console.log(`  [Stacked ${sec.phase}] Week ${d}: weekStart=${new Date(weekStartUtc).toISOString().slice(0, 10)}, matches=${matches}`);
+                      }
+                    }
+                    
+                    // Check if this week contains today
+                    return todayWeekStartUtc === weekStartUtc;
+                  } else if (timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+                    // For month-based views, highlight all days in the month containing today
+                    // Use todayUtc directly instead of recalculating from todayDayIndex to avoid rounding errors
+                    const todayDateObj = new Date(todayUtc);
+                    const todayY = todayDateObj.getUTCFullYear();
+                    const todayM = todayDateObj.getUTCMonth();
+                    
+                    // In month mode, d is a month index, not a day index
+                    // Convert to actual date: add d months to phaseBase
+                    const monthDate = new Date(phaseBase);
+                    monthDate.setUTCMonth(monthDate.getUTCMonth() + d);
+                    const dY = monthDate.getUTCFullYear();
+                    const dM = monthDate.getUTCMonth();
+                    
+                    return dY === todayY && dM === todayM;
+                  }
+                  return false;
+                };
 
                 // Build alternating bands, resetting per phase.
                 const fills: string[] = [];
                 if (unitMode) {
                   for (let d = 0; d <= dayCount; d += 1) {
-                    const fill = (d === todayDayIndex) ? "rgba(239, 68, 68, 0.4)" : (d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
+                    const fill = isTodayDay(d) ? "rgba(239, 68, 68, 0.4)" : (d % 2 === 0 ? "var(--gantt-band-a)" : "var(--gantt-band-b)");
                     fills.push(fill);
                   }
                 } else {
                   let workdayIdx = 0;
                   for (let d = 0; d <= dayCount; d += 1) {
-                    const t = phaseBase + d * 24 * 60 * 60 * 1000;
+                    // In week/month modes, dayCount represents weeks/months, not days
+                    // But for band rendering, we still need to calculate the actual date
+                    // based on the unit (week/month) that d represents
+                    let actualDaysOffset = d;
+                    if (timeAxisMode === "calendarWeeks" || timeAxisMode === "weeks") {
+                      // d is a week index, convert to days (7 days per week)
+                      actualDaysOffset = d * 7;
+                    } else if (timeAxisMode === "calendarMonths" || timeAxisMode === "months") {
+                      // d is a month index, approximate as 30 days per month for band calculation
+                      // (exact month boundaries handled in isTodayDay)
+                      actualDaysOffset = d * 30;
+                    }
+                    const t = phaseBase + actualDaysOffset * 24 * 60 * 60 * 1000;
                     const dow = new Date(t).getUTCDay();
                     const isWeekend = dow === 0 || dow === 6;
-                    if (d === todayDayIndex) {
+                    if (isTodayDay(d)) {
                       fills.push("rgba(239, 68, 68, 0.4)");
                     } else if (isWeekend) {
                       fills.push("var(--gantt-weekend)");
