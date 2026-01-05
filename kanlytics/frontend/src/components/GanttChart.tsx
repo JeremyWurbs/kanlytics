@@ -98,6 +98,24 @@ function barPath(
   return d;
 }
 
+function getStatusFillPercentage(status: string | null | undefined): number {
+  const statusLower = (status || "").trim().toLowerCase();
+  switch (statusLower) {
+    case "backlog":
+      return 0;
+    case "planned":
+      return 0.25;
+    case "in progress":
+      return 0.5;
+    case "in review":
+      return 0.75;
+    case "done":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 function fmtIsoDateTime(s?: string | null): string {
   if (!s) return "—";
   try {
@@ -2125,8 +2143,14 @@ export const GanttChart: React.FC<Props> = ({
                     const x = chartPadLeft + xDay * pxPerDay + padL;
                     const w = Math.max(2, Math.max(6, wDay * pxPerDay) - padL - padR);
                     const d = barPath(x, y, w, h, true, true);
+                    const fillPercent = getStatusFillPercentage(t.status);
+                    const fillW = w * fillPercent;
+                    const fillD = fillPercent > 0 ? barPath(x, y, fillW, h, true, fillPercent >= 1) : "";
                     return (
                       <>
+                        {fillPercent > 0 && fillD ? (
+                          <path d={fillD} fill={strokeColor} fillOpacity={0.3} />
+                        ) : null}
                         <path d={d} fill="none" stroke={strokeColor} strokeWidth={isCritical ? 2.5 : 2} opacity={0.9} />
                         {!phaseSummary ? (
                           <text x={x + 8} y={y + h / 2 + 4} fontSize={11} fill="var(--text)" style={{ pointerEvents: "none" }}>
@@ -2138,23 +2162,60 @@ export const GanttChart: React.FC<Props> = ({
                   })()
                 ) : (
                   <>
-                    {segs.map((seg, idx) => {
-                      const padL = seg.roundLeft ? Math.max(0, barPadPx) : 0;
-                      const padR = seg.roundRight ? Math.max(0, barPadPx) : 0;
-                      const x = chartPadLeft + seg.xDay * pxPerDay + padL;
-                      const w = Math.max(2, Math.max(6, seg.wDay * pxPerDay) - padL - padR);
-                      const d = barPath(x, y, w, h, seg.roundLeft, seg.roundRight);
-                      return (
-                        <path
-                          key={`${t.id}-seg-${idx}`}
-                          d={d}
-                          fill="none"
-                          stroke={strokeColor}
-                          strokeWidth={isCritical ? 2.5 : 2}
-                          opacity={0.9}
-                        />
-                      );
-                    })}
+                    {(() => {
+                      // Calculate total width across all segments for proportional fill
+                      const totalWidth = segs.reduce((sum, seg) => {
+                        const padL = seg.roundLeft ? Math.max(0, barPadPx) : 0;
+                        const padR = seg.roundRight ? Math.max(0, barPadPx) : 0;
+                        return sum + Math.max(2, Math.max(6, seg.wDay * pxPerDay) - padL - padR);
+                      }, 0);
+                      
+                      const fillPercent = getStatusFillPercentage(t.status);
+                      const fillWidth = totalWidth * fillPercent;
+                      
+                      // Track how much fill we've applied so far
+                      let fillRemaining = fillWidth;
+                      
+                      return segs.map((seg, idx) => {
+                        const padL = seg.roundLeft ? Math.max(0, barPadPx) : 0;
+                        const padR = seg.roundRight ? Math.max(0, barPadPx) : 0;
+                        const x = chartPadLeft + seg.xDay * pxPerDay + padL;
+                        const w = Math.max(2, Math.max(6, seg.wDay * pxPerDay) - padL - padR);
+                        const d = barPath(x, y, w, h, seg.roundLeft, seg.roundRight);
+                        
+                        // Calculate fill for this segment
+                        let segmentFillW = 0;
+                        let segmentFillD = "";
+                        if (fillRemaining > 0) {
+                          if (fillRemaining >= w) {
+                            // Fill entire segment
+                            segmentFillW = w;
+                            segmentFillD = barPath(x, y, segmentFillW, h, seg.roundLeft, seg.roundRight);
+                            fillRemaining -= w;
+                          } else {
+                            // Partially fill this segment
+                            segmentFillW = fillRemaining;
+                            segmentFillD = barPath(x, y, segmentFillW, h, seg.roundLeft, false);
+                            fillRemaining = 0;
+                          }
+                        }
+                        
+                        return (
+                          <React.Fragment key={`${t.id}-seg-${idx}`}>
+                            {segmentFillW > 0 && segmentFillD ? (
+                              <path d={segmentFillD} fill={strokeColor} fillOpacity={0.3} />
+                            ) : null}
+                            <path
+                              d={d}
+                              fill="none"
+                              stroke={strokeColor}
+                              strokeWidth={isCritical ? 2.5 : 2}
+                              opacity={0.9}
+                            />
+                          </React.Fragment>
+                        );
+                      });
+                    })()}
                     {/* Label once, on the first segment */}
                     {!phaseSummary ? (
                       <text
