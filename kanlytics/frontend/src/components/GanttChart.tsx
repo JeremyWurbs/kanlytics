@@ -1677,7 +1677,6 @@ export const GanttChart: React.FC<Props> = ({
                                   </div>
                                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                                     <Pill text={state ? state.charAt(0).toUpperCase() + state.slice(1) : "Open"} variant={stateVariant as any} />
-                                    <Pill text={`Status: ${statusText}`} variant="blue" />
                                     <Pill text={`ID: ${display}`} variant="neutral" />
                                     {isCritical ? <Pill text="Critical path" variant="red" title="Slack = 0 days" /> : null}
                                     {typeof slackDays === "number" ? <Pill text={`Slack: ${slackDays}d`} variant="purple" /> : null}
@@ -1759,6 +1758,9 @@ export const GanttChart: React.FC<Props> = ({
                                 <div style={{ display: "grid", gap: 8 }}>
                                   <div className="small">
                                     <span style={{ fontWeight: 700 }}>Display ID</span>: <span className="mono">{display}</span>
+                                  </div>
+                                  <div className="small">
+                                    <span style={{ fontWeight: 700 }}>Status</span>: {statusText}
                                   </div>
                                   <div className="small">
                                     <span style={{ fontWeight: 700 }}>Phase</span>: {selected.phase || "—"}
