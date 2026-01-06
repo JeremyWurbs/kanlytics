@@ -1281,6 +1281,26 @@ export default function App() {
     setLoadProjectOpen(true);
   }
 
+  async function loadTemplateFile() {
+    try {
+      setBusy(true);
+      const templatePath = "/software-product-launch-template.csv";
+      const response = await fetch(templatePath);
+      if (!response.ok) {
+        throw new Error("Failed to load template file");
+      }
+      const text = await response.text();
+      setNewProjectTemplateFileName("Software Product Launch Template.csv");
+      setNewProjectTemplatePath(templatePath);
+      setNewProjectTemplateCsvText(text);
+      showToast("success", "Template loaded successfully.");
+    } catch (e: any) {
+      showToast("error", e?.message || "Failed to load template file.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openNewProjectModal() {
     setNewProjectName(projectName);
     setNewProjectNameError("");
@@ -3907,9 +3927,17 @@ export default function App() {
                     >
                       Select File
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => void loadTemplateFile()}
+                      disabled={busy}
+                      style={{ ...secondaryButtonStyle, height: 44, paddingTop: 0, paddingBottom: 0 }}
+                    >
+                      Use Template
+                    </button>
                   </div>
                   <div className="small" style={{ marginTop: 6, color: "var(--muted-2)" }}>
-                    If provided, the project will start with this CSV loaded. Otherwise you’ll start with an empty chart and can add phases/tasks.
+                    If provided, the project will start with this CSV loaded. Use the template button to load the included Software Product Launch template, or select your own CSV file. Otherwise you'll start with an empty chart and can add phases/tasks.
                   </div>
                 </div>
               </div>
