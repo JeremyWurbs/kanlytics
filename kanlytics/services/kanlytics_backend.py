@@ -2202,24 +2202,62 @@ class KanlyticsBackend(Service):
                     tasks.append(issue)
 
                 self._job_update(job_id, progress=92, message="Generating CSV…")
-                gantt = Gantt(tasks)
-                csv_text = gantt.export_csv_v2()
-                earliest = None
-                for t in tasks:
-                    if getattr(t, "start_date", None) is None:
-                        continue
-                    sd = t.start_date
-                    earliest = sd if earliest is None else min(earliest, sd)
+                
+                # Get the project board title
+                project_title = client.get_project_title()
+                
+                # Group tasks by project_name field
+                tasks_by_project: dict[str, list[GitHubIssue]] = {}
+                for task in tasks:
+                    proj_name = getattr(task, "project_name", None) or ""
+                    proj_name = proj_name.strip() if proj_name else ""
+                    # If no project name, use the board title or "Default"
+                    if not proj_name:
+                        proj_name = project_title or "Default"
+                    if proj_name not in tasks_by_project:
+                        tasks_by_project[proj_name] = []
+                    tasks_by_project[proj_name].append(task)
+                
+                # Generate CSV for each project
+                projects_data = []
+                for proj_name, proj_tasks in tasks_by_project.items():
+                    gantt = Gantt(proj_tasks)
+                    csv_text = gantt.export_csv_v2()
+                    earliest = None
+                    for t in proj_tasks:
+                        if getattr(t, "start_date", None) is None:
+                            continue
+                        sd = t.start_date
+                        earliest = sd if earliest is None else min(earliest, sd)
+                    projects_data.append({
+                        "project_name": proj_name,
+                        "task_count": len(proj_tasks),
+                        "csv_text": csv_text,
+                        "project_start_date": None if earliest is None else earliest.isoformat(),
+                    })
+                
+                # If only one project, return it in the old format for backward compatibility
+                # Otherwise return the list
+                if len(projects_data) == 1:
+                    single = projects_data[0]
+                    result = {
+                        "task_count": single["task_count"],
+                        "csv_text": single["csv_text"],
+                        "project_start_date": single["project_start_date"],
+                        "project_title": single["project_name"],
+                    }
+                else:
+                    result = {
+                        "projects": projects_data,
+                        "project_title": project_title,
+                    }
+                
                 self._job_update(
                     job_id,
                     state="completed",
                     progress=100,
                     message="Done.",
-                    result={
-                        "task_count": len(tasks),
-                        "csv_text": csv_text,
-                        "project_start_date": None if earliest is None else earliest.isoformat(),
-                    },
+                    result=result,
                 )
             except Exception as e:
                 self._job_update(job_id, state="failed", progress=100, message="Failed.", error=str(e))

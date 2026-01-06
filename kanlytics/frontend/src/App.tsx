@@ -1624,20 +1624,8 @@ export default function App() {
 
     // URL → GitHub connect flow (auto-start).
     if (/^https?:\/\//i.test(raw)) {
-      // Ensure we have a project to associate this import with, and hydrate UI state now.
-      let derivedName = projectName.trim();
-      try {
-        const u = new URL(raw);
-        const parts = u.pathname.split("/").filter(Boolean);
-        const orgIdx = parts.indexOf("orgs");
-        const org = orgIdx >= 0 ? parts[orgIdx + 1] : "";
-        const projIdx = parts.indexOf("projects");
-        const num = projIdx >= 0 ? parts[projIdx + 1] : "";
-        if (!derivedName) derivedName = `${org || "GitHub"} Project${num ? ` ${num}` : ""}`.trim();
-      } catch {
-        // ignore
-      }
-      ensureActiveProject({ name: derivedName || "GitHub Project", projectUrl: raw });
+      // Set the project URL but don't create a project yet - let the import process
+      // create/update projects based on what's actually in the board
       setProjectUrl(raw);
       setLoadProjectOpen(false);
       setGithubAutoConnect(true);
@@ -2195,34 +2183,140 @@ export default function App() {
           const result = st.result || {};
 
           if (mode === "connect") {
-            const csv = String((result as any).csv_text || "");
-            const count = Number((result as any).task_count || 0);
-            const projectStart = String((result as any).project_start_date || "").trim();
+            const projects = (result as any).projects;
             const projectTitle = String((result as any).project_title || "").trim();
-            closeGithubModal();
-            setLayout(null);
-            setTimelineStatus(null);
-            setPlanId("");
-            setFileName("github-project.csv");
-            if (projectStart) setStartDate(projectStart);
-            if (csv.trim()) {
-              setCsvText(csv);
-              // Update project name with the GitHub project title if available
-              if (projectTitle) {
-                setProjectName(projectTitle);
-                // Update the active project record with the new name
+            
+            if (projects && Array.isArray(projects) && projects.length > 1) {
+              // Multiple projects: create/update each one
+              closeGithubModal();
+              let totalCount = 0;
+              let firstActiveId: string | null = null;
+              let firstProjName = "";
+              let firstProjCsv = "";
+              let firstProjStart = "";
+              
+              setProjects((prev) => {
+                const updated = [...prev];
+                for (const proj of projects) {
+                  const projName = String(proj.project_name || "").trim() || projectTitle || "Imported Project";
+                  const projCsv = String(proj.csv_text || "");
+                  const projCount = Number(proj.task_count || 0);
+                  const projStart = String(proj.project_start_date || "").trim();
+                  totalCount += projCount;
+                  
+                  if (projCsv.trim()) {
+                    // Find existing project by name and projectUrl
+                    const existingIdx = updated.findIndex(
+                      (p) => p.name === projName && p.projectUrl === projectUrl
+                    );
+                    
+                    if (existingIdx >= 0) {
+                      // Update existing project
+                      updated[existingIdx] = {
+                        ...updated[existingIdx],
+                        csvText: projCsv,
+                        startDate: projStart || updated[existingIdx].startDate,
+                      };
+                      if (!firstActiveId) {
+                        firstActiveId = updated[existingIdx].id;
+                        firstProjName = projName;
+                        firstProjCsv = projCsv;
+                        firstProjStart = projStart || updated[existingIdx].startDate;
+                      }
+                    } else {
+                      // Create new project
+                      const newId = newProjectId();
+                      const newProject: ProjectRecord = {
+                        id: newId,
+                        name: projName,
+                        startDate: projStart || todayISO(),
+                        workingDays: false,
+                        csvText: projCsv,
+                        phases: [],
+                        fileName: "github-project.csv",
+                        projectUrl: projectUrl,
+                        issueRepo: issueRepo,
+                      };
+                      updated.unshift(newProject);
+                      if (!firstActiveId) {
+                        firstActiveId = newId;
+                        firstProjName = projName;
+                        firstProjCsv = projCsv;
+                        firstProjStart = projStart || todayISO();
+                      }
+                    }
+                  }
+                }
+                return updated;
+              });
+              
+              // Activate the first project if none is currently active
+              if (firstActiveId && firstProjCsv) {
+                if (!activeProjectId) {
+                  setActiveProjectId(firstActiveId);
+                  setProjectName(firstProjName);
+                  setStartDate(firstProjStart);
+                  setCsvText(firstProjCsv);
+                  setProjectUrl(projectUrl);
+                  setIssueRepo(issueRepo);
+                } else if (activeProjectId === firstActiveId) {
+                  // Update UI state if the active project was updated
+                  setCsvText(firstProjCsv);
+                  if (firstProjStart) setStartDate(firstProjStart);
+                }
+              }
+              
+              setLayout(null);
+              setTimelineStatus(null);
+              setPlanId("");
+              setFileName("github-project.csv");
+              showToast("success", `Connected. Imported ${projects.length} projects with ${totalCount} total items.`);
+            } else {
+              // Single project (backward compatibility)
+              const csv = String((result as any).csv_text || "");
+              const count = Number((result as any).task_count || 0);
+              const projectStart = String((result as any).project_start_date || "").trim();
+              const singleProjectTitle = String((result as any).project_title || "").trim();
+              closeGithubModal();
+              setLayout(null);
+              setTimelineStatus(null);
+              setPlanId("");
+              setFileName("github-project.csv");
+              if (projectStart) setStartDate(projectStart);
+              if (csv.trim()) {
+                setCsvText(csv);
+                // Use the GitHub project title as the project name (instead of deriving from URL)
+                const finalProjectName = singleProjectTitle || projectName.trim() || "Imported Project";
+                setProjectName(finalProjectName);
+                // Create or update the active project record
                 if (activeProjectId) {
                   setProjects((prev) =>
                     prev.map((p) =>
                       p.id === activeProjectId
-                        ? { ...p, name: projectTitle }
+                        ? { ...p, name: finalProjectName, csvText: csv, startDate: projectStart || p.startDate, projectUrl: projectUrl }
                         : p
                     )
                   );
+                } else {
+                  // Create a new project if none exists
+                  const newId = newProjectId();
+                  const newProject: ProjectRecord = {
+                    id: newId,
+                    name: finalProjectName,
+                    startDate: projectStart || todayISO(),
+                    workingDays: false,
+                    csvText: csv,
+                    phases: [],
+                    fileName: "github-project.csv",
+                    projectUrl: projectUrl,
+                    issueRepo: issueRepo,
+                  };
+                  setProjects((prev) => [newProject, ...prev]);
+                  setActiveProjectId(newId);
                 }
               }
+              showToast("success", `Connected. Imported ${count} items.`);
             }
-            showToast("success", `Connected. Imported ${count} items.`);
           } else {
             closeGithubModal();
             const updatedIssues = Number((result as any).updated_issues || 0);
