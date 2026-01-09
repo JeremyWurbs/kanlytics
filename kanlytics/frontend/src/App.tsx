@@ -149,6 +149,7 @@ export default function App() {
   const suppressAutoScheduleRef = useRef<boolean>(false);
   const toastTimerRef = useRef<number | null>(null);
   const allProjectsExportRef = useRef<HTMLDivElement | null>(null);
+  const applyingTemplateRef = useRef<boolean>(false);
 
   // Sidebar should default to expanded on first load (and on refresh).
   // We intentionally do not persist this preference so the user always lands
@@ -298,6 +299,122 @@ export default function App() {
       return 4;
     }
   });
+
+  type ViewTemplate = "Custom" | "Summary" | "Task Breakdown";
+  const [viewTemplate, setViewTemplate] = useState<ViewTemplate>("Custom");
+
+  // Helper function to check if current settings match a template
+  const checkTemplateMatch = (
+    template: "Summary" | "Task Breakdown",
+    currentSettings: {
+      durationMode: "wall" | "billable";
+      detailMode: "all" | "phaseSummary";
+      timeAxisMode: "dayCount" | "weeks" | "months" | "calendarDays" | "calendarWeeks" | "calendarMonths";
+      phaseLayout: "linear" | "stacked";
+      pxPerDay: number;
+      barPadPx: number;
+      showDeps: boolean;
+      showDailyGrid: boolean;
+      showCriticalPath: boolean;
+      multiProjectSharedAxis: boolean;
+    }
+  ): boolean => {
+    if (template === "Summary") {
+      return (
+        currentSettings.durationMode === "wall" &&
+        currentSettings.detailMode === "phaseSummary" &&
+        currentSettings.timeAxisMode === "calendarWeeks" &&
+        currentSettings.phaseLayout === "linear" &&
+        currentSettings.pxPerDay === 35 &&
+        currentSettings.barPadPx === 4 &&
+        currentSettings.showDeps === false &&
+        currentSettings.showDailyGrid === false &&
+        currentSettings.showCriticalPath === true &&
+        currentSettings.multiProjectSharedAxis === true
+      );
+    } else if (template === "Task Breakdown") {
+      return (
+        currentSettings.durationMode === "wall" &&
+        currentSettings.detailMode === "all" &&
+        currentSettings.timeAxisMode === "calendarDays" &&
+        currentSettings.phaseLayout === "stacked" &&
+        currentSettings.pxPerDay === 40 &&
+        currentSettings.barPadPx === 4 &&
+        currentSettings.showDeps === true &&
+        currentSettings.showDailyGrid === true &&
+        currentSettings.showCriticalPath === true &&
+        currentSettings.multiProjectSharedAxis === false
+      );
+    }
+    return false;
+  };
+
+  // Helper function to apply a template
+  const applyTemplate = (template: "Summary" | "Task Breakdown") => {
+    applyingTemplateRef.current = true;
+    
+    if (template === "Summary") {
+      setDurationMode("wall");
+      setDetailMode("phaseSummary");
+      setTimeAxisMode("calendarWeeks");
+      setPhaseLayout("linear");
+      setPxPerDay(35);
+      setBarPadPx(4);
+      setShowDeps(false);
+      setShowDailyGrid(false);
+      setShowCriticalPath(true);
+      setMultiProjectSharedAxis(true);
+    } else if (template === "Task Breakdown") {
+      setDurationMode("wall");
+      setDetailMode("all");
+      setTimeAxisMode("calendarDays");
+      setPhaseLayout("stacked");
+      setPxPerDay(40);
+      setBarPadPx(4);
+      setShowDeps(true);
+      setShowDailyGrid(true);
+      setShowCriticalPath(true);
+      setMultiProjectSharedAxis(false);
+    }
+    
+    setViewTemplate(template);
+  };
+
+  // Reset the applying template flag after template is applied
+  useEffect(() => {
+    if (applyingTemplateRef.current && (viewTemplate === "Summary" || viewTemplate === "Task Breakdown")) {
+      // Use requestAnimationFrame to ensure this runs after React has processed all state updates
+      requestAnimationFrame(() => {
+        applyingTemplateRef.current = false;
+      });
+    }
+  }, [viewTemplate, durationMode, detailMode, timeAxisMode, phaseLayout, pxPerDay, barPadPx, showDeps, showDailyGrid, showCriticalPath, multiProjectSharedAxis]);
+
+  // Effect to check if current settings match a template
+  useEffect(() => {
+    if (applyingTemplateRef.current) return;
+    
+    const currentSettings = {
+      durationMode,
+      detailMode,
+      timeAxisMode,
+      phaseLayout,
+      pxPerDay,
+      barPadPx,
+      showDeps,
+      showDailyGrid,
+      showCriticalPath,
+      multiProjectSharedAxis,
+    };
+    
+    if (checkTemplateMatch("Summary", currentSettings)) {
+      setViewTemplate("Summary");
+    } else if (checkTemplateMatch("Task Breakdown", currentSettings)) {
+      setViewTemplate("Task Breakdown");
+    } else {
+      setViewTemplate("Custom");
+    }
+  }, [durationMode, detailMode, timeAxisMode, phaseLayout, pxPerDay, barPadPx, showDeps, showDailyGrid, showCriticalPath, multiProjectSharedAxis]);
 
   const [planId, setPlanId] = useState<string>("");
   const [layout, setLayout] = useState<GanttLayout | null>(null);
@@ -4589,9 +4706,36 @@ export default function App() {
                   alignItems: "end",
                 }}
               >
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <div className="label">View Template</div>
+                  <select
+                    value={viewTemplate}
+                    onChange={(e) => {
+                      const template = e.target.value as ViewTemplate;
+                      if (template === "Custom") {
+                        setViewTemplate("Custom");
+                      } else {
+                        applyTemplate(template as "Summary" | "Task Breakdown");
+                      }
+                    }}
+                  >
+                    <option value="Custom">Custom</option>
+                    <option value="Summary">Summary</option>
+                    <option value="Task Breakdown">Task Breakdown</option>
+                  </select>
+                </div>
+
                 <div>
                   <div className="label">Duration mode</div>
-                  <select value={durationMode} onChange={(e) => setDurationMode(e.target.value as any)}>
+                  <select
+                    value={durationMode}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setDurationMode(e.target.value as any);
+                    }}
+                  >
                     <option value="wall">Wall</option>
                     <option value="billable">Billable</option>
                   </select>
@@ -4599,7 +4743,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Detail</div>
-                  <select value={detailMode} onChange={(e) => setDetailMode(e.target.value as any)}>
+                  <select
+                    value={detailMode}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setDetailMode(e.target.value as any);
+                    }}
+                  >
                     <option value="all">All tasks</option>
                     <option value="phaseSummary">Phase summary</option>
                   </select>
@@ -4607,11 +4759,17 @@ export default function App() {
 
                 <div>
                   <div className="label">Time axis</div>
-                  <select value={timeAxisMode} onChange={(e) => {
-                    const newMode = e.target.value as any;
-                    console.log(`[App] Time axis changed: ${timeAxisMode} -> ${newMode}`);
-                    setTimeAxisMode(newMode);
-                  }}>
+                  <select
+                    value={timeAxisMode}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      const newMode = e.target.value as any;
+                      console.log(`[App] Time axis changed: ${timeAxisMode} -> ${newMode}`);
+                      setTimeAxisMode(newMode);
+                    }}
+                  >
                     <option value="dayCount">Days</option>
                     <option value="weeks">Weeks</option>
                     <option value="months">Months</option>
@@ -4623,7 +4781,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Phase layout</div>
-                  <select value={phaseLayout} onChange={(e) => setPhaseLayout(e.target.value as any)}>
+                  <select
+                    value={phaseLayout}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setPhaseLayout(e.target.value as any);
+                    }}
+                  >
                     <option value="stacked">Stacked</option>
                     <option value="linear">Linear</option>
                   </select>
@@ -4631,7 +4797,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Zoom</div>
-                  <select value={pxPerDay} onChange={(e) => setPxPerDay(Number(e.target.value))}>
+                  <select
+                    value={pxPerDay}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setPxPerDay(Number(e.target.value));
+                    }}
+                  >
                     {[10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80].map((v) => (
                       <option key={v} value={v}>
                         {v} px/
@@ -4647,7 +4821,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Task bar padding</div>
-                  <select value={barPadPx} onChange={(e) => setBarPadPx(Number(e.target.value))}>
+                  <select
+                    value={barPadPx}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setBarPadPx(Number(e.target.value));
+                    }}
+                  >
                     {[0, 1, 2, 3, 4, 6, 8, 10, 12].map((v) => (
                       <option key={v} value={v}>
                         {v}px
@@ -4658,7 +4840,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Dependencies</div>
-                  <select value={showDeps ? "yes" : "no"} onChange={(e) => setShowDeps(e.target.value === "yes")}>
+                  <select
+                    value={showDeps ? "yes" : "no"}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setShowDeps(e.target.value === "yes");
+                    }}
+                  >
                     <option value="yes">Show</option>
                     <option value="no">Hide</option>
                   </select>
@@ -4666,7 +4856,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Daily grid</div>
-                  <select value={showDailyGrid ? "yes" : "no"} onChange={(e) => setShowDailyGrid(e.target.value === "yes")}>
+                  <select
+                    value={showDailyGrid ? "yes" : "no"}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setShowDailyGrid(e.target.value === "yes");
+                    }}
+                  >
                     <option value="no">Off</option>
                     <option value="yes">On</option>
                   </select>
@@ -4674,7 +4872,15 @@ export default function App() {
 
                 <div>
                   <div className="label">Critical path</div>
-                  <select value={showCriticalPath ? "yes" : "no"} onChange={(e) => setShowCriticalPath(e.target.value === "yes")}>
+                  <select
+                    value={showCriticalPath ? "yes" : "no"}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setShowCriticalPath(e.target.value === "yes");
+                    }}
+                  >
                     <option value="yes">Highlight</option>
                     <option value="no">Off</option>
                   </select>
@@ -4684,7 +4890,12 @@ export default function App() {
                   <div className="label">Multi-project time axis</div>
                   <select
                     value={multiProjectSharedAxis ? "shared" : "individual"}
-                    onChange={(e) => setMultiProjectSharedAxis(e.target.value === "shared")}
+                    onChange={(e) => {
+                      if (!applyingTemplateRef.current) {
+                        setViewTemplate("Custom");
+                      }
+                      setMultiProjectSharedAxis(e.target.value === "shared");
+                    }}
                   >
                     <option value="individual">Individual axes</option>
                     <option value="shared">Shared axis</option>
