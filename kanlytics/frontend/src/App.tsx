@@ -1795,6 +1795,7 @@ export default function App() {
   }
 
   async function exportCurrentGanttAsPng() {
+    console.log('[Export] exportCurrentGanttAsPng called');
     if (!activeProjectId) {
       showToast("error", "No active project to export.");
       return;
@@ -1811,6 +1812,7 @@ export default function App() {
       setExportingPng(true);
       // Give React a tick to hide overlays.
       await new Promise((r) => window.setTimeout(r, 30));
+      console.log('[Export] Starting export process');
 
       // Capture full scrollable width/height by cloning offscreen and expanding scroll containers.
       const wrapper = document.createElement("div");
@@ -1824,16 +1826,163 @@ export default function App() {
       const clone = el.cloneNode(true) as HTMLElement;
       wrapper.appendChild(clone);
       document.body.appendChild(wrapper);
+      
+      // Debug: Compare computed styles between original and clone
+      // This helps identify if the dashboard has different styling
+      // Uncomment to debug:
+      // const originalTaskList = el.querySelector('[data-kanlytics-gantt-export-root] > div:first-child');
+      // const clonedTaskList = clone.querySelector('[data-kanlytics-gantt-export-root] > div:first-child');
+      // if (originalTaskList && clonedTaskList) {
+      //   const originalRow = originalTaskList.querySelector('div[style*="borderBottom"]') as HTMLElement;
+      //   const clonedRow = clonedTaskList.querySelector('div[style*="borderBottom"]') as HTMLElement;
+      //   if (originalRow && clonedRow) {
+      //     const origStyle = window.getComputedStyle(originalRow);
+      //     const cloneStyle = window.getComputedStyle(clonedRow);
+      //     console.log('[Export Debug] Original row:', {
+      //       height: origStyle.height,
+      //       paddingTop: origStyle.paddingTop,
+      //       paddingBottom: origStyle.paddingBottom,
+      //       lineHeight: origStyle.lineHeight,
+      //       boxSizing: origStyle.boxSizing,
+      //     });
+      //     console.log('[Export Debug] Cloned row (before fix):', {
+      //       height: cloneStyle.height,
+      //       paddingTop: cloneStyle.paddingTop,
+      //       paddingBottom: cloneStyle.paddingBottom,
+      //       lineHeight: cloneStyle.lineHeight,
+      //       boxSizing: cloneStyle.boxSizing,
+      //     });
+      //   }
+      // }
+
+      // First, fix row heights and text spacing before expanding scroll containers
+      // This ensures rows have the correct height and tight text spacing before html2canvas captures
+      console.log('[Export] Looking for taskListArea in clone');
+      const taskListArea = clone.querySelector('[data-kanlytics-gantt-export-root] > div:first-child');
+      if (taskListArea) {
+        console.log('[Export] Found taskListArea, processing rows');
+        // Find all rows (phase headers and task rows) - they have borderBottom
+        const allRows = Array.from(taskListArea.querySelectorAll<HTMLElement>('div'));
+        for (const row of allRows) {
+          const style = window.getComputedStyle(row);
+          const hasBorder = style.borderBottomWidth && parseFloat(style.borderBottomWidth) > 0;
+          
+          // If this is a row (has border), fix its height and spacing
+          if (hasBorder) {
+            const paddingTop = parseFloat(style.paddingTop || '0');
+            const paddingBottom = parseFloat(style.paddingBottom || '0');
+            const borderBottom = parseFloat(style.borderBottomWidth || '0');
+            
+            // Reduce padding to minimize visual space around text
+            // Original is 8px top/bottom, reduce to 4px for tighter spacing
+            const reducedPadding = Math.min(4, paddingTop);
+            row.style.paddingTop = `${reducedPadding}px`;
+            row.style.paddingBottom = `${reducedPadding}px`;
+            
+            const totalPaddingAndBorder = reducedPadding + reducedPadding + borderBottom;
+            
+            // Target total height is 28px
+            // If html2canvas uses content-box, we need: height = 28 - padding - border
+            // If html2canvas uses border-box, we need: height = 28 (includes padding and border)
+            // To be safe, we'll use content-box with calculated height to ensure total is 28px
+            let availableContentHeight: number;
+            if (totalPaddingAndBorder < 28) {
+              const contentHeight = 28 - totalPaddingAndBorder;
+              row.style.boxSizing = "content-box";
+              row.style.height = `${contentHeight}px`;
+              row.style.minHeight = `${contentHeight}px`;
+              row.style.maxHeight = `${contentHeight}px`;
+              // With content-box, the content height is exactly what we set
+              availableContentHeight = contentHeight;
+            } else {
+              // Fallback: if padding+border >= 28, just set height to 28 with border-box
+              row.style.boxSizing = "border-box";
+              row.style.height = "28px";
+              row.style.minHeight = "28px";
+              row.style.maxHeight = "28px";
+              // With border-box, content height = total - padding - border
+              availableContentHeight = 28 - reducedPadding - reducedPadding - borderBottom;
+            }
+            
+            // The text span is 22.4px tall, but needs to fit within availableContentHeight
+            // We need to constrain the text to fit within the available space
+            row.style.margin = "0";
+            
+            // Fix all text elements within the row
+            const textElements = row.querySelectorAll('span, div, button, p');
+            console.log(`[Export] Fixing ${textElements.length} text elements, availableContentHeight: ${availableContentHeight}px`);
+            for (const textEl of textElements) {
+              const textEl_typed = textEl as HTMLElement;
+              const textStyle = window.getComputedStyle(textEl_typed);
+              const fontSize = parseFloat(textStyle.fontSize || '14');
+              const originalHeight = parseFloat(textStyle.height || '0');
+              
+              // Set line-height to fit within available content height
+              // Use a line-height that's slightly less than available height to ensure it fits
+              const maxLineHeight = Math.max(fontSize, availableContentHeight - 1);
+              textEl_typed.style.lineHeight = `${maxLineHeight}px`;
+              
+              // Constrain the height of the text element itself
+              textEl_typed.style.maxHeight = `${availableContentHeight}px`;
+              textEl_typed.style.overflow = "hidden";
+              
+              console.log(`[Export] Text element: original height=${originalHeight}px, setting maxHeight=${availableContentHeight}px, lineHeight=${maxLineHeight}px`);
+              
+              // Remove margins
+              textEl_typed.style.margin = "0";
+              textEl_typed.style.marginTop = "0";
+              textEl_typed.style.marginBottom = "0";
+            }
+            
+            // Keep flexbox alignment as "center" to match dashboard
+          }
+        }
+      }
+      
+      // Force a reflow to ensure all style changes are applied
+      void clone.offsetHeight;
+      
+      // Debug: Check computed styles after our fixes
+      // Uncomment to debug:
+      // const clonedTaskList = clone.querySelector('[data-kanlytics-gantt-export-root] > div:first-child');
+      // if (clonedTaskList) {
+      //   const clonedRow = clonedTaskList.querySelector('div[style*="borderBottom"]') as HTMLElement;
+      //   if (clonedRow) {
+      //     const cloneStyle = window.getComputedStyle(clonedRow);
+      //     const textEl = clonedRow.querySelector('span') as HTMLElement;
+      //     const textStyle = textEl ? window.getComputedStyle(textEl) : null;
+      //     console.log('[Export Debug] Cloned row (after fix):', {
+      //       height: cloneStyle.height,
+      //       paddingTop: cloneStyle.paddingTop,
+      //       paddingBottom: cloneStyle.paddingBottom,
+      //       lineHeight: cloneStyle.lineHeight,
+      //       boxSizing: cloneStyle.boxSizing,
+      //       textLineHeight: textStyle?.lineHeight,
+      //       textMarginTop: textStyle?.marginTop,
+      //       textMarginBottom: textStyle?.marginBottom,
+      //     });
+      //   }
+      // }
+      
+      // Small delay to ensure browser has rendered the style changes
+      await new Promise((r) => window.setTimeout(r, 10));
 
       // Expand any scroll containers inside the clone.
+      // Also ensure box-sizing is set correctly for all elements
       const all = Array.from(clone.querySelectorAll<HTMLElement>("*"));
       for (const node of all) {
+        // Ensure box-sizing is border-box for all elements (except rows we already fixed)
+        const cs = window.getComputedStyle(node);
+        if (cs.boxSizing !== "border-box" && !node.style.boxSizing) {
+          node.style.boxSizing = "border-box";
+        }
+        
         // If it scrolls, expand it.
         const sw = node.scrollWidth;
         const sh = node.scrollHeight;
         if (sw > node.clientWidth + 1) node.style.width = `${sw}px`;
         if (sh > node.clientHeight + 1) node.style.height = `${sh}px`;
-        const cs = window.getComputedStyle(node);
+        
         if (cs.overflow === "auto" || cs.overflow === "scroll") node.style.overflow = "visible";
         if (cs.overflowX === "auto" || cs.overflowX === "scroll") node.style.overflowX = "visible";
         if (cs.overflowY === "auto" || cs.overflowY === "scroll") node.style.overflowY = "visible";
@@ -1863,6 +2012,176 @@ export default function App() {
       wrapper.style.width = `${fullW}px`;
       wrapper.style.height = `${fullH}px`;
       clone.style.width = `${fullW}px`;
+      
+      // Force a reflow to ensure styles are applied before html2canvas captures
+      void clone.offsetHeight;
+
+      // Adjust SVG y positions to account for borderBottom on each row
+      // Measure actual row heights from the cloned DOM to handle cases where
+      // html2canvas renders heights differently than expected
+      try {
+        // First, measure actual row heights from the cloned DOM
+        const taskListArea = clone.querySelector('[data-kanlytics-gantt-export-root] > div:first-child');
+        const actualRowHeights: number[] = [];
+        const htmlRowPositions = new Map<number, number>(); // rowIdx -> top position in pixels
+        const htmlRowHeights = new Map<number, number>(); // rowIdx -> height in pixels
+        
+        if (taskListArea) {
+          let currentTop = 0;
+          let rowIdx = 0;
+          const allDivs = Array.from(taskListArea.querySelectorAll<HTMLElement>('div > div, div'));
+          
+          for (const div of allDivs) {
+            const style = window.getComputedStyle(div);
+            const hasBorder = style.borderBottomWidth && parseFloat(style.borderBottomWidth) > 0;
+            const divHeight = parseFloat(style.height) || 0;
+            
+            // Check if this looks like a row (has border and reasonable height)
+            // Accept heights between 20-60px to catch actual rows
+            if (hasBorder && divHeight > 20 && divHeight < 60) {
+              actualRowHeights.push(divHeight);
+              htmlRowPositions.set(rowIdx, currentTop);
+              htmlRowHeights.set(rowIdx, divHeight);
+              const borderHeight = parseFloat(style.borderBottomWidth || '0');
+              currentTop += divHeight + borderHeight;
+              rowIdx++;
+            }
+          }
+        }
+        
+        // Use the most common row height, or average if we have measurements
+        // Fallback to 28 if we couldn't measure (shouldn't happen)
+        let rowHeight = 28;
+        if (actualRowHeights.length > 0) {
+          // Use the median height for stability (less affected by outliers)
+          const sorted = [...actualRowHeights].sort((a, b) => a - b);
+          rowHeight = sorted[Math.floor(sorted.length / 2)];
+        }
+        
+        const svg = clone.querySelector('svg');
+        if (svg && htmlRowPositions.size > 0) {
+          // Build a map of SVG row index to expected row index
+          // SVG uses: y = rowIdx * rowHeight + offset
+          // We need to map SVG row indices to HTML row indices
+          
+          // Common offsets in GanttChart:
+          // - Task bars: offset = 5 (y = rowIdx * rowHeight + 5)
+          // - Axis labels: offset = 18 (y = rowIdx * rowHeight + 18)
+          // - Dependency midpoints: offset = 14 (y = rowIdx * rowHeight + 14)
+          // - Phase header lanes: offset = 2 (y = rowIdx * rowHeight + 2)
+          
+          const getRowIndex = (y: number): number => {
+            // Try common offsets to find which row this element belongs to
+            const offsets = [5, 18, 14, 2, 0];
+            let bestRowIdx: number | null = null;
+            let bestError = Infinity;
+            
+            for (const offset of offsets) {
+              const testRowIdx = Math.round((y - offset) / rowHeight);
+              if (testRowIdx >= 0) {
+                const expectedY = testRowIdx * rowHeight + offset;
+                const error = Math.abs(y - expectedY);
+                if (error < bestError && error < 3) { // Within 3px tolerance
+                  bestError = error;
+                  bestRowIdx = testRowIdx;
+                }
+              }
+            }
+            
+            // Fallback: if no good match, use simple division
+            if (bestRowIdx === null) {
+              bestRowIdx = Math.max(0, Math.round(y / rowHeight));
+            }
+            
+            return bestRowIdx;
+          };
+          
+          // Adjust all SVG elements with y attributes
+          const allElements = Array.from(svg.querySelectorAll<SVGElement>('*'));
+          for (const el of allElements) {
+            const yAttr = el.getAttribute('y');
+            if (yAttr !== null && !isNaN(parseFloat(yAttr))) {
+              const y = parseFloat(yAttr);
+              const rowIdx = getRowIndex(y);
+              
+              // Check if this element is part of a task bar
+              const isTaskBar = el.closest('[data-kanlytics-taskbar="1"]') !== null;
+              
+              // Calculate the shift needed using actual measured HTML row positions
+              let shift: number;
+              if (htmlRowPositions.has(rowIdx)) {
+                const htmlRowTop = htmlRowPositions.get(rowIdx)!;
+                const htmlRowHeight = htmlRowHeights.get(rowIdx) || rowHeight;
+                const svgRowTop = rowIdx * rowHeight;
+                const offset = y - svgRowTop;
+                
+                if (isTaskBar) {
+                  // Center task bars vertically within the HTML row
+                  const taskBarCenter = y + 9; // Current center (y + half of 18px height)
+                  const htmlRowCenter = htmlRowTop + htmlRowHeight / 2;
+                  shift = htmlRowCenter - taskBarCenter;
+                } else {
+                  // For other elements, maintain relative position: shift by htmlRowTop - svgRowTop
+                  shift = htmlRowTop - svgRowTop;
+                }
+              } else {
+                // Fallback: if row not found, use calculated position
+                // This shouldn't happen if measurement worked correctly
+                const svgRowTop = rowIdx * rowHeight;
+                const htmlRowTop = rowIdx * rowHeight; // Assume same height for fallback
+                shift = htmlRowTop - svgRowTop;
+              }
+              
+              const newY = y + shift;
+              el.setAttribute('y', String(newY));
+            }
+            
+            // Adjust path data for dependency arrows
+            if (el.tagName === 'path') {
+              const d = el.getAttribute('d');
+              if (d) {
+                // Check if this path is part of a task bar (dependency arrows connect task bars)
+                const isTaskBarPath = el.closest('[data-kanlytics-taskbar="1"]') !== null;
+                
+                const adjustedD = d.replace(/([ML])\s+([\d.-]+)\s+([\d.-]+)/g, (match, cmd, x, y) => {
+                  const yNum = parseFloat(y);
+                  if (yNum >= 0) {
+                    // Use same row index calculation as other elements
+                    const pathRowIdx = getRowIndex(yNum);
+                    
+                    // Calculate shift using actual measured positions
+                    let pathShift: number;
+                    if (htmlRowPositions.has(pathRowIdx)) {
+                      const htmlRowTop = htmlRowPositions.get(pathRowIdx)!;
+                      const svgRowTop = pathRowIdx * rowHeight;
+                      pathShift = htmlRowTop - svgRowTop;
+                      if (isTaskBarPath) {
+                        // For task bar paths, center them
+                        const htmlRowHeight = htmlRowHeights.get(pathRowIdx) || rowHeight;
+                        const htmlRowCenter = htmlRowTop + htmlRowHeight / 2;
+                        const pathCenter = yNum + 9; // Assuming task bar center
+                        pathShift = htmlRowCenter - pathCenter;
+                      }
+                    } else {
+                      // Fallback
+                      pathShift = isTaskBarPath ? pathRowIdx : pathRowIdx;
+                    }
+                    
+                    return `${cmd} ${x} ${yNum + pathShift}`;
+                  }
+                  return match;
+                });
+                if (adjustedD !== d) {
+                  el.setAttribute('d', adjustedD);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // If adjustment fails, continue with export anyway
+        console.warn('Failed to adjust SVG positions for export:', e);
+      }
 
       // Keep canvas dimensions in check for very large exports.
       const maxCanvasDim = 16000;
@@ -1934,6 +2253,75 @@ export default function App() {
       (clone.style as any).gridTemplateColumns = "";
       wrapper.appendChild(clone);
       document.body.appendChild(wrapper);
+
+      // Fix row heights and text spacing before expanding scroll containers
+      // This ensures rows have the correct height and tight text spacing before html2canvas captures
+      console.log('[Export Joint] Fixing row heights and text spacing');
+      try {
+        const allGanttCharts = clone.querySelectorAll('[data-kanlytics-gantt-export-root]');
+        console.log(`[Export Joint] Found ${allGanttCharts.length} Gantt charts`);
+        for (const ganttChart of allGanttCharts) {
+          // Find the first direct child div (task list area)
+          const taskListArea = ganttChart.firstElementChild as HTMLElement | null;
+          if (taskListArea && taskListArea.tagName === 'DIV') {
+            const allRows = Array.from(taskListArea.querySelectorAll<HTMLElement>('div'));
+            for (const row of allRows) {
+              const style = window.getComputedStyle(row);
+              const hasBorder = style.borderBottomWidth && parseFloat(style.borderBottomWidth) > 0;
+              
+              if (hasBorder) {
+                const paddingTop = parseFloat(style.paddingTop || '0');
+                const paddingBottom = parseFloat(style.paddingBottom || '0');
+                const borderBottom = parseFloat(style.borderBottomWidth || '0');
+                
+                // Reduce padding to minimize visual space around text
+                const reducedPadding = Math.min(4, paddingTop);
+                row.style.paddingTop = `${reducedPadding}px`;
+                row.style.paddingBottom = `${reducedPadding}px`;
+                
+                const totalPaddingAndBorder = reducedPadding + reducedPadding + borderBottom;
+                
+                // Target total height is 28px
+                let availableContentHeight: number;
+                if (totalPaddingAndBorder < 28) {
+                  const contentHeight = 28 - totalPaddingAndBorder;
+                  row.style.boxSizing = "content-box";
+                  row.style.height = `${contentHeight}px`;
+                  row.style.minHeight = `${contentHeight}px`;
+                  row.style.maxHeight = `${contentHeight}px`;
+                  availableContentHeight = contentHeight;
+                } else {
+                  row.style.boxSizing = "border-box";
+                  row.style.height = "28px";
+                  row.style.minHeight = "28px";
+                  row.style.maxHeight = "28px";
+                  availableContentHeight = 28 - reducedPadding - reducedPadding - borderBottom;
+                }
+                
+                // Constrain text elements to fit within available space
+                row.style.margin = "0";
+                const textElements = row.querySelectorAll('span, div, button, p');
+                console.log(`[Export Joint] Fixing ${textElements.length} text elements, availableContentHeight: ${availableContentHeight}px`);
+                for (const textEl of textElements) {
+                  const textEl_typed = textEl as HTMLElement;
+                  const textStyle = window.getComputedStyle(textEl_typed);
+                  const fontSize = parseFloat(textStyle.fontSize || '14');
+                  const maxLineHeight = Math.max(fontSize, availableContentHeight - 1);
+                  textEl_typed.style.lineHeight = `${maxLineHeight}px`;
+                  textEl_typed.style.maxHeight = `${availableContentHeight}px`;
+                  textEl_typed.style.overflow = "hidden";
+                  textEl_typed.style.margin = "0";
+                  textEl_typed.style.marginTop = "0";
+                  textEl_typed.style.marginBottom = "0";
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[Export Joint] Error fixing row heights:', e);
+        // Continue with export even if row fixing fails
+      }
 
       const all = Array.from(clone.querySelectorAll<HTMLElement>("*"));
       for (const node of all) {
