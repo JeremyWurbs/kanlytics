@@ -31,6 +31,7 @@ type Props = {
   hideHeader?: boolean;
   axisBaseDate?: string;
   axisMaxXDay?: number;
+  disableHorizontalScroll?: boolean;
 };
 
 function groupByPhase(tasks: TaskItem[]) {
@@ -326,6 +327,7 @@ export const GanttChart: React.FC<Props> = ({
   hideHeader = false,
   axisBaseDate,
   axisMaxXDay,
+  disableHorizontalScroll = false,
 }) => {
   const formatPhaseLabel = (ph: string) => {
     const major = phaseMajors[ph];
@@ -1574,7 +1576,12 @@ export const GanttChart: React.FC<Props> = ({
       </div>
 
       <div
-        style={{ overflow: "auto", position: "relative" }}
+        style={{ 
+          overflow: disableHorizontalScroll ? "visible" : "auto", 
+          overflowX: disableHorizontalScroll ? "visible" : "auto",
+          overflowY: "auto",
+          position: "relative" 
+        }}
         onClick={() => {
           // Clicking the empty chart area clears selection.
           clearSelection();

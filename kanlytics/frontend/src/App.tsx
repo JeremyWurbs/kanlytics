@@ -3609,6 +3609,86 @@ export default function App() {
                     <div className="small" style={{ marginTop: 10 }}>
                       Select one or more projects to render their Gantt charts below.
                     </div>
+                  ) : multiProjectSharedAxis && sharedAxis ? (
+                    <div
+                      ref={allProjectsExportRef}
+                      className="ganttShell"
+                      style={{
+                        marginTop: 12,
+                        overflow: "auto",
+                      }}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                        {allProjectsSelectedIdsSorted.map((pid) => {
+                          const p = projects.find((x) => x.id === pid);
+                          if (!p) return null;
+                          const layout = allProjectsLayoutsById[pid];
+                          const err = allProjectsErrorsById[pid];
+                          return (
+                            <div key={pid} style={{ minWidth: 0 }}>
+                              {/* Don't duplicate the project title here; the chart's "Project" row already shows it. */}
+                              {err ? (
+                                <div className="small" style={{ marginTop: 8, color: "var(--toast-error-text)" }}>
+                                  {err}
+                                </div>
+                              ) : null}
+                              {!layout ? (
+                                <div className="small" style={{ marginTop: 8 }}>
+                                  Loading…
+                                </div>
+                              ) : (
+                                <div style={{ overflow: "visible" }}>
+                                  <GanttChart
+                                    layout={layout}
+                                    exportId={pid}
+                                    pxPerDay={pxPerDay}
+                                    rowHeight={28}
+                                    showDeps={showDeps}
+                                    showDailyGrid={showDailyGrid}
+                                    showCriticalPath={showCriticalPath}
+                                    timeAxisMode={timeAxisMode}
+                                    phaseLayout={phaseLayout}
+                                    barPadPx={barPadPx}
+                                    projectName={p.name}
+                                    detailMode={detailMode}
+                                    suppressInfoPanel={exportingPng}
+                                    hideHeader={true}
+                                    axisBaseDate={sharedAxis.axisBaseDate}
+                                    axisMaxXDay={sharedAxis.axisMaxXDay}
+                                    disableHorizontalScroll={true}
+                                    onFetchPhaseMeta={async (phase) => {
+                                      const repo = (p.issueRepo || "").trim();
+                                      if (!repo) throw new Error("No default repo set for this project.");
+                                      const pn = (p.name || "").trim() || "Project";
+                                      const csv = String((projects.find((x) => x.id === pid)?.csvText || "") ?? "");
+                                      if ((p.projectUrl || "").trim()) {
+                                        return await getPhaseMeta({ projectUrl: (p.projectUrl || "").trim(), phase, issueRepo: repo });
+                                      }
+                                      return await getPhaseMetaCsv({ repo, projectName: pn, csvText: csv, phase });
+                                    }}
+                                    onSavePhaseMeta={async (phase, description) => {
+                                      const repo = (p.issueRepo || "").trim();
+                                      if (!repo) throw new Error("No default repo set for this project.");
+                                      const pn = (p.name || "").trim() || "Project";
+                                      const csv = String((projects.find((x) => x.id === pid)?.csvText || "") ?? "");
+                                      if ((p.projectUrl || "").trim()) {
+                                        return await updatePhaseMeta({
+                                          projectUrl: (p.projectUrl || "").trim(),
+                                          phase,
+                                          description,
+                                          issueRepo: repo,
+                                        });
+                                      }
+                                      return await updatePhaseMetaCsv({ repo, projectName: pn, csvText: csv, phase, description });
+                                    }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                   ) : (
                     <div
                       ref={allProjectsExportRef}
