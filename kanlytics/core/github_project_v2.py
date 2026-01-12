@@ -309,10 +309,20 @@ class GitHubProjectV2:
         nodes = (((data.get("node") or {}).get("fields") or {}).get("nodes") or [])
         return [n for n in nodes if isinstance(n, dict) and n.get("id") and n.get("name")]
 
-    def ensure_text_field(self, name: str) -> str:
+    def ensure_text_field(self, name: str, read_only: bool = False) -> Optional[str]:
+        """
+        Get the field ID for a text field, creating it if it doesn't exist.
+        
+        When read_only=True, only reads the field without creating it.
+        Returns None if the field doesn't exist and read_only=True.
+        """
         for f in self.list_fields():
             if (f.get("name") or "").strip().lower() == name.strip().lower():
                 return f["id"]
+
+        if read_only:
+            # For read-only operations (import), don't create the field
+            return None
 
         mutation = """
         mutation($input: CreateProjectV2FieldInput!) {
@@ -369,13 +379,17 @@ class GitHubProjectV2:
             raise ValueError("Failed to create ProjectV2 date field")
         return field_id
 
-    def ensure_status_columns(self, *, options: List[str], default: str = "Backlog") -> Tuple[str, Dict[str, str]]:
+    def ensure_status_columns(self, *, options: List[str], default: str = "Backlog", read_only: bool = False) -> Tuple[Optional[str], Dict[str, str]]:
         """
         Ensure the ProjectV2 single-select field "Status" has exactly the provided options.
         Also ensures every project item has a valid status, defaulting missing/unknown to `default`.
+        
+        When read_only=True, only reads the Status field without modifying the project board.
+        This should be used for import/connect operations to avoid changing the actual project.
+        In read_only mode, returns (None, {}) if the Status field doesn't exist.
 
         Returns:
-          (status_field_id, option_id_by_name)
+          (status_field_id, option_id_by_name) - status_field_id may be None in read_only mode
         """
         status_field = None
         for f in self.list_fields():
@@ -383,8 +397,12 @@ class GitHubProjectV2:
                 status_field = f
                 break
 
-        # If Status doesn't exist, create it as SINGLE_SELECT.
+        # If Status doesn't exist and we're in read-only mode, return None to indicate field doesn't exist
         if status_field is None:
+            if read_only:
+                # In read-only mode, don't create the field - just return None
+                return None, {}
+            # If Status doesn't exist, create it as SINGLE_SELECT (only in write mode).
             mutation = """
             mutation($input: CreateProjectV2FieldInput!) {
               createProjectV2Field(input: $input) {
@@ -427,9 +445,10 @@ class GitHubProjectV2:
         status_field_id = status_field["id"]
 
         # Normalize options to exactly what we want (order matters for display).
+        # Skip this if read_only=True to avoid modifying the project board.
         existing_names = [(o.get("name") or "").strip() for o in (status_field.get("options") or []) if isinstance(o, dict)]
         want = [o.strip() for o in options]
-        if existing_names != want:
+        if not read_only and existing_names != want:
             mutation = """
             mutation($input: UpdateProjectV2FieldInput!) {
               updateProjectV2Field(input: $input) {
@@ -472,17 +491,19 @@ class GitHubProjectV2:
             if nm and oid:
                 option_id_by_name[nm] = oid
 
-        if default not in option_id_by_name:
-            raise ValueError(f'Default status "{default}" not present in Status options.')
+        if not read_only:
+            if default not in option_id_by_name:
+                raise ValueError(f'Default status "{default}" not present in Status options.')
 
-        # Ensure all items have a valid status option set; set missing/unknown to default.
-        for item in self.iter_items():
-            item_id = item.get("id")
-            if not item_id:
-                continue
-            current_name = self._get_single_select_value(item, "Status")
-            if not current_name or current_name not in option_id_by_name:
-                self.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=option_id_by_name[default])
+            # Ensure all items have a valid status option set; set missing/unknown to default.
+            # Skip this if read_only=True to avoid modifying the project board.
+            for item in self.iter_items():
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                current_name = self._get_single_select_value(item, "Status")
+                if not current_name or current_name not in option_id_by_name:
+                    self.set_single_select_field(item_id=item_id, field_id=status_field_id, option_id=option_id_by_name[default])
 
         return status_field_id, option_id_by_name
 

@@ -1480,13 +1480,20 @@ class KanlyticsBackend(Service):
 
     def connect_project(self, payload: ConnectProjectInput) -> ConnectProjectOutput:
         """
-        Download ProjectV2 items (issues + draft issues), ensure each item has a stable
-        "Task ID" (UUID) field, and return a V2 CSV representation suitable for loading
-        into the Gantt planner.
+        Download ProjectV2 items (issues + draft issues) and return a V2 CSV representation
+        suitable for loading into the Gantt planner.
+        
+        IMPORTANT: This is a READ-ONLY operation. It does NOT modify the remote project board.
+        - Does not create or modify Status field options
+        - Does not create or modify Task ID fields
+        - Does not write any data to project items
+        - Only reads existing data from the project board
         """
         client = GitHubProjectV2(payload.project_url)
-        client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
-        task_id_field_id = client.ensure_text_field("Task ID")
+        # Use read_only=True to avoid modifying the actual project board during import
+        client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog", read_only=True)
+        # Use read_only=True to avoid creating fields during import
+        task_id_field_id = client.ensure_text_field("Task ID", read_only=True)
 
         tasks: list[GitHubIssue] = []
         for item in client.iter_items():
@@ -1503,10 +1510,16 @@ class KanlyticsBackend(Service):
             if PHASE_META_MARKER in body_text:
                 continue
 
-            task_id = client._get_text_field_value(item, "Task ID")
+            # Try to read Task ID from the field (if field exists and has a value)
+            task_id = None
+            if task_id_field_id:
+                task_id = client._get_text_field_value(item, "Task ID")
             if not task_id:
+                # Generate a Task ID locally for import, but DO NOT write it to the remote project
+                # Import operations must never modify the remote project board
                 task_id = new_uuid()
-                client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                # NOTE: We intentionally do NOT call client.set_text_field() here
+                # to ensure import operations are read-only
 
             status = client._get_single_select_value(item, "Status") or ""
             phase = client._get_text_field_value(item, "Phase") or ""
@@ -2091,6 +2104,12 @@ class KanlyticsBackend(Service):
     def connect_project_start(self, payload: ConnectProjectInput) -> StartJobOutput:
         """
         Start an async ProjectV2 connect job (for UI progress reporting).
+        
+        IMPORTANT: This is a READ-ONLY operation. It does NOT modify the remote project board.
+        - Does not create or modify Status field options
+        - Does not create or modify Task ID fields
+        - Does not write any data to project items
+        - Only reads existing data from the project board
         """
         job_id = str(uuid4())
         status = JobStatusOutput(job_id=job_id, state="queued", progress=0, message="Queued…")
@@ -2101,10 +2120,12 @@ class KanlyticsBackend(Service):
             try:
                 self._job_update(job_id, state="running", progress=1, message="Connecting to project…")
                 client = GitHubProjectV2(payload.project_url)
-                self._job_update(job_id, progress=3, message="Normalizing Status columns…")
-                client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog")
-                self._job_update(job_id, progress=5, message="Ensuring Task ID field…")
-                task_id_field_id = client.ensure_text_field("Task ID")
+                self._job_update(job_id, progress=3, message="Reading Status columns…")
+                # Use read_only=True to avoid modifying the actual project board during import
+                client.ensure_status_columns(options=STATUS_OPTIONS, default="Backlog", read_only=True)
+                self._job_update(job_id, progress=5, message="Reading Task ID field…")
+                # Use read_only=True to avoid creating fields during import
+                task_id_field_id = client.ensure_text_field("Task ID", read_only=True)
 
                 self._job_update(job_id, progress=10, message="Downloading project items…")
                 items = list(client.iter_items())
@@ -2126,10 +2147,16 @@ class KanlyticsBackend(Service):
                     if PHASE_META_MARKER in body_text:
                         continue
 
-                    task_id = client._get_text_field_value(item, "Task ID")
+                    # Try to read Task ID from the field (if field exists and has a value)
+                    task_id = None
+                    if task_id_field_id:
+                        task_id = client._get_text_field_value(item, "Task ID")
                     if not task_id:
+                        # Generate a Task ID locally for import, but DO NOT write it to the remote project
+                        # Import operations must never modify the remote project board
                         task_id = new_uuid()
-                        client.set_text_field(item_id=item_id, field_id=task_id_field_id, text=task_id)
+                        # NOTE: We intentionally do NOT call client.set_text_field() here
+                        # to ensure import operations are read-only
 
                     status_val = client._get_single_select_value(item, "Status") or ""
                     phase = client._get_text_field_value(item, "Phase") or ""
