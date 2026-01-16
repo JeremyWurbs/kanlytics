@@ -470,6 +470,21 @@ export default function App() {
 
   const hasCsv = useMemo(() => csvText.trim().length > 0, [csvText]);
 
+  const activeProject = useMemo(() => {
+    if (!activeProjectId) return null;
+    const project = projects.find((p) => p.id === activeProjectId) || null;
+    if (project) {
+      console.log("[activeProject] Computed activeProject:", {
+        id: project.id,
+        name: project.name,
+        projectManager: project.projectManager,
+        techLead: project.techLead,
+        client: project.client,
+      });
+    }
+    return project;
+  }, [activeProjectId, projects]);
+
   const secondaryButtonStyle: React.CSSProperties = useMemo(
     () => ({
       background: "var(--card)",
@@ -570,22 +585,41 @@ export default function App() {
         const metadata = await getMetadata(csvText);
         if (cancelled) return;
         if (metadata.metadata) {
+          const meta = metadata.metadata;
+          const metaAny = meta as any;
+          console.log("[useEffect metadata sync] Syncing metadata from CSV to project record:", {
+            projectId: activeProjectId,
+            metadata: meta,
+            currentProject: p,
+          });
+          
           setProjects((prev) =>
-            prev.map((x) =>
-              x.id === activeProjectId
-                ? {
-                    ...x,
-                    projectHash: metadata.metadata?.project_hash ?? x.projectHash,
-                    projectManager: metadata.metadata?.project_manager ?? x.projectManager,
-                    techLead: metadata.metadata?.tech_lead ?? x.techLead,
-                    client: metadata.metadata?.client ?? x.client,
-                  }
-                : x
-            )
+            prev.map((x) => {
+              if (x.id === activeProjectId) {
+                // Pydantic serializes with alias names, so access via bracket notation with alias names
+                const projectManager = metaAny['Project Manager'] ?? meta.project_manager;
+                const techLead = metaAny['Tech Lead'] ?? meta.tech_lead;
+                const client = metaAny['Client'] ?? meta.client;
+                const projectHash = metaAny['Project Hash'] ?? meta.project_hash;
+                
+                const updated = {
+                  ...x,
+                  projectHash: projectHash !== null && projectHash !== undefined ? projectHash : x.projectHash,
+                  // Use metadata values if they exist (even if empty string), otherwise keep existing
+                  projectManager: projectManager !== null && projectManager !== undefined ? projectManager : x.projectManager,
+                  techLead: techLead !== null && techLead !== undefined ? techLead : x.techLead,
+                  client: client !== null && client !== undefined ? client : x.client,
+                };
+                console.log("[useEffect metadata sync] Updated project:", updated);
+                return updated;
+              }
+              return x;
+            })
           );
         }
-      } catch {
+      } catch (e) {
         // Non-fatal: metadata extraction failed
+        console.error("[useEffect metadata sync] Failed to extract metadata:", e);
       }
     })();
     return () => {
@@ -654,11 +688,6 @@ export default function App() {
       }, 3000);
     }
   }
-
-  const activeProject = useMemo(() => {
-    if (!activeProjectId) return null;
-    return projects.find((p) => p.id === activeProjectId) || null;
-  }, [projects, activeProjectId]);
 
   const filteredAllProjects = useMemo(() => {
     const q = allProjectsQuery.trim().toLowerCase();
@@ -1532,6 +1561,15 @@ export default function App() {
     // Update metadata with project hash, PM, TL, and Client
     try {
       setBusy(true);
+      
+      // Log input values for debugging
+      console.log("[createNewProject] Metadata input:", {
+        projectManager: newProjectManager.trim(),
+        techLead: newProjectTechLead.trim(),
+        client: newProjectClient.trim(),
+        projectHash: newProjectHash.trim(),
+      });
+      
       const metadataResult = await updateMetadata({
         csvText: finalCsvText,
         projectName: pn,
@@ -1541,33 +1579,74 @@ export default function App() {
         client: newProjectClient.trim() || undefined,
       });
       
+      console.log("[createNewProject] updateMetadata response:", metadataResult);
+      console.log("[createNewProject] Updated CSV (first 500 chars):", metadataResult.csv_text.substring(0, 500));
+      
       // Update CSV with metadata
       setCsvText(metadataResult.csv_text);
       
       // Force a re-read of metadata from the updated CSV to ensure consistency
       const updatedMetadata = await getMetadata(metadataResult.csv_text);
       
+      console.log("[createNewProject] getMetadata response:", updatedMetadata);
+      
       // Update project record with metadata from the updated CSV
-      if (updatedMetadata.metadata) {
-        const meta = updatedMetadata.metadata;
-        setProjects((prev) =>
-          prev.map((proj) =>
-            proj.id === id
-              ? {
-                  ...proj,
-                  projectHash: meta.project_hash ?? proj.projectHash,
-                  projectManager: meta.project_manager ?? undefined,
-                  techLead: meta.tech_lead ?? undefined,
-                  client: meta.client ?? undefined,
-                  csvText: metadataResult.csv_text,
-                }
-              : proj
-          )
-        );
+      const meta = updatedMetadata.metadata;
+      if (meta) {
+        console.log("[createNewProject] Updating project record with metadata:", {
+          projectId: id,
+          metadata: meta,
+        });
+        // Pydantic models with aliases serialize with the alias names in JSON
+        // So we need to access properties by their alias names, not field names
+        const metaAny = meta as any;
+        console.log("[createNewProject] Metadata property access test:", {
+          "meta.project_manager": meta.project_manager,
+          "meta.tech_lead": meta.tech_lead,
+          "meta.client": meta.client,
+          "metaAny['Project Manager']": metaAny['Project Manager'],
+          "metaAny['Tech Lead']": metaAny['Tech Lead'],
+          "metaAny['Client']": metaAny['Client'],
+          "Object.keys(meta)": Object.keys(meta),
+          "Object.keys(metaAny)": Object.keys(metaAny),
+          "JSON.stringify(meta)": JSON.stringify(meta),
+        });
+        
+        setProjects((prev) => {
+          const updated = prev.map((proj) => {
+            if (proj.id === id) {
+              // Pydantic serializes with alias names, so access via bracket notation with alias names
+              // Fall back to snake_case property names if aliases don't exist
+              const projectManager = metaAny['Project Manager'] ?? meta.project_manager ?? proj.projectManager;
+              const techLead = metaAny['Tech Lead'] ?? meta.tech_lead ?? proj.techLead;
+              const client = metaAny['Client'] ?? meta.client ?? proj.client;
+              const projectHash = metaAny['Project Hash'] ?? meta.project_hash ?? proj.projectHash;
+              
+              const updatedProj = {
+                ...proj,
+                projectHash: projectHash,
+                // Always use metadata values from the response - they reflect what's actually in the CSV
+                projectManager: projectManager,
+                techLead: techLead,
+                client: client,
+                csvText: metadataResult.csv_text,
+              };
+              console.log("[createNewProject] Project before update:", proj);
+              console.log("[createNewProject] Project after update:", updatedProj);
+              return updatedProj;
+            }
+            return proj;
+          });
+          console.log("[createNewProject] All projects after update:", updated);
+          return updated;
+        });
+      } else {
+        console.warn("[createNewProject] No metadata in response:", updatedMetadata);
       }
     } catch (e: any) {
-      // Non-fatal: metadata update failed, but project is still created
-      console.error("Failed to update metadata:", e);
+      // Show error to user - this is important, not just a silent failure
+      console.error("[createNewProject] Failed to update metadata:", e);
+      showToast("error", `Failed to save project metadata: ${e?.message || String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -1616,26 +1695,47 @@ export default function App() {
       // Force a re-read of metadata from the updated CSV to ensure consistency
       const updatedMetadata = await getMetadata(result.csv_text);
       
+      console.log("[saveMetadata] Updated metadata from CSV:", updatedMetadata);
+      
       // Update CSV with new metadata
       setCsvText(result.csv_text);
       
       // Update project record with metadata from the updated CSV
       if (activeProjectId) {
         const meta = updatedMetadata.metadata;
-        setProjects((prev) =>
-          prev.map((p) =>
-            p.id === activeProjectId
-              ? {
-                  ...p,
-                  projectHash: meta?.project_hash ?? p.projectHash,
-                  projectManager: meta?.project_manager ?? undefined,
-                  techLead: meta?.tech_lead ?? undefined,
-                  client: meta?.client ?? undefined,
-                  csvText: result.csv_text,
-                }
-              : p
-          )
-        );
+        const metaAny = meta as any;
+        console.log("[saveMetadata] Updating project record:", {
+          projectId: activeProjectId,
+          metadata: meta,
+        });
+        
+        setProjects((prev) => {
+          const updated = prev.map((p) => {
+            if (p.id === activeProjectId) {
+              // Pydantic serializes with alias names, so access via bracket notation with alias names
+              const projectManager = metaAny['Project Manager'] ?? meta?.project_manager;
+              const techLead = metaAny['Tech Lead'] ?? meta?.tech_lead;
+              const client = metaAny['Client'] ?? meta?.client;
+              const projectHash = metaAny['Project Hash'] ?? meta?.project_hash;
+              
+              const updatedProj = {
+                ...p,
+                projectHash: projectHash ?? p.projectHash,
+                // Use metadata values if they exist (even if empty string), otherwise keep existing
+                projectManager: projectManager !== null && projectManager !== undefined ? projectManager : p.projectManager,
+                techLead: techLead !== null && techLead !== undefined ? techLead : p.techLead,
+                client: client !== null && client !== undefined ? client : p.client,
+                csvText: result.csv_text,
+              };
+              console.log("[saveMetadata] Project before:", p);
+              console.log("[saveMetadata] Project after:", updatedProj);
+              return updatedProj;
+            }
+            return p;
+          });
+          console.log("[saveMetadata] All projects after update:", updated);
+          return updated;
+        });
       }
       
       setEditMetadataOpen(false);
@@ -3118,15 +3218,27 @@ export default function App() {
                 </tr>
                 <tr>
                   <td style={labelStyle}>Project Manager</td>
-                  <td style={valueStyle}>{activeProject?.projectManager || "—"}</td>
+                  <td style={valueStyle}>
+                    {activeProject?.projectManager != null && activeProject.projectManager !== "" 
+                      ? activeProject.projectManager 
+                      : "—"}
+                  </td>
                 </tr>
                 <tr>
                   <td style={labelStyle}>Tech Lead</td>
-                  <td style={valueStyle}>{activeProject?.techLead || "—"}</td>
+                  <td style={valueStyle}>
+                    {activeProject?.techLead != null && activeProject.techLead !== "" 
+                      ? activeProject.techLead 
+                      : "—"}
+                  </td>
                 </tr>
                 <tr>
                   <td style={labelStyle}>Client</td>
-                  <td style={valueStyle}>{activeProject?.client || "—"}</td>
+                  <td style={valueStyle}>
+                    {activeProject?.client != null && activeProject.client !== "" 
+                      ? activeProject.client 
+                      : "—"}
+                  </td>
                 </tr>
                 <tr>
                   <td style={labelStyle}>Start Date</td>

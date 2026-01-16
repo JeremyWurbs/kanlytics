@@ -102,9 +102,13 @@ def write_csv_with_metadata(metadata: dict[str, str], csv_body: str) -> str:
     lines: list[str] = []
     
     # Write metadata in defined order
+    # IMPORTANT: Write all metadata fields that exist in the dict
+    # If a field is in the metadata dict, write it (even if empty string) to preserve it
     for key in METADATA_FIELDS:
-        value = metadata.get(key, "")
-        if value:
+        if key in metadata:
+            value = metadata[key]
+            # Always write the field if it exists in the metadata dict
+            # This ensures metadata is preserved and can be read back correctly
             lines.append(f"# {key}: {value}")
     
     # Add end marker if we have any metadata
@@ -115,7 +119,10 @@ def write_csv_with_metadata(metadata: dict[str, str], csv_body: str) -> str:
     if csv_body.strip():
         lines.append(csv_body.strip())
     
-    return "\n".join(lines) + "\n" if lines else ""
+    result = "\n".join(lines) + "\n" if lines else ""
+    print(f"[write_csv_with_metadata] Writing metadata: {metadata}")
+    print(f"[write_csv_with_metadata] Result (first 500 chars): {result[:500]}")
+    return result
 
 
 def ensure_project_hash(metadata: dict[str, str]) -> dict[str, str]:
@@ -1197,8 +1204,11 @@ class KanlyticsBackend(Service):
         Extract project metadata from CSV text.
         """
         metadata_dict, csv_body = parse_csv_metadata(payload.csv_text)
+        print(f"[get_metadata] Parsed metadata dict: {metadata_dict}")
+        metadata_obj = ProjectMetadata.from_dict(metadata_dict)
+        print(f"[get_metadata] ProjectMetadata object: project_manager={metadata_obj.project_manager}, tech_lead={metadata_obj.tech_lead}, client={metadata_obj.client}")
         return GetMetadataOutput(
-            metadata=ProjectMetadata.from_dict(metadata_dict),
+            metadata=metadata_obj,
             csv_body=csv_body,
         )
 
@@ -1210,6 +1220,9 @@ class KanlyticsBackend(Service):
         # Parse existing metadata
         existing_metadata, csv_body = parse_csv_metadata(payload.csv_text)
         
+        # Log input for debugging
+        print(f"[update_metadata] Input payload: project_manager={payload.project_manager}, tech_lead={payload.tech_lead}, client={payload.client}")
+        
         # Update with new values (only if provided)
         if payload.project_name is not None:
             existing_metadata["Project Name"] = payload.project_name
@@ -1217,10 +1230,15 @@ class KanlyticsBackend(Service):
             existing_metadata["Project Hash"] = payload.project_hash
         if payload.project_manager is not None:
             existing_metadata["Project Manager"] = payload.project_manager
+            print(f"[update_metadata] Set Project Manager to: '{payload.project_manager}'")
         if payload.tech_lead is not None:
             existing_metadata["Tech Lead"] = payload.tech_lead
+            print(f"[update_metadata] Set Tech Lead to: '{payload.tech_lead}'")
         if payload.client is not None:
             existing_metadata["Client"] = payload.client
+            print(f"[update_metadata] Set Client to: '{payload.client}'")
+        
+        print(f"[update_metadata] Metadata dict before writing: {existing_metadata}")
         
         # Ensure project has a hash
         existing_metadata = ensure_project_hash(existing_metadata)
@@ -1228,9 +1246,14 @@ class KanlyticsBackend(Service):
         # Write updated CSV
         output_csv = write_csv_with_metadata(existing_metadata, csv_body)
         
+        print(f"[update_metadata] Output CSV (first 500 chars): {output_csv[:500]}")
+        
+        metadata_obj = ProjectMetadata.from_dict(existing_metadata)
+        print(f"[update_metadata] ProjectMetadata object: project_manager={metadata_obj.project_manager}, tech_lead={metadata_obj.tech_lead}, client={metadata_obj.client}")
+        
         return UpdateMetadataOutput(
             csv_text=output_csv,
-            metadata=ProjectMetadata.from_dict(existing_metadata),
+            metadata=metadata_obj,
         )
 
     def create_plan(self, payload: CreatePlanInput) -> CreatePlanOutput:
